@@ -4,6 +4,12 @@
 
 This module provides a safe way to execute Python code in a container. It is intended to be used with language models to enable them to execute code in a safe environment separate from the host machine (your computer or server).
 
+The container comes preloaded with the following packages:
+
+```bash
+numpy matplotlib seaborn scikit-learn yfinance scipy statsmodels sympy bokeh plotly dash networkx pyvis pandas
+```
+
 ## Installation
 
 ```bash

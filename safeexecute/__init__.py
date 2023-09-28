@@ -5,8 +5,32 @@ import subprocess
 import docker
 from docker.errors import ImageNotFound
 
+IMAGE_NAME = "joshxt/safeexecute:latest"
+
+
+def install_docker_image():
+    client = docker.from_env()
+    try:
+        client.images.get(IMAGE_NAME)
+        logging.info(f"Image '{IMAGE_NAME}' found locally")
+    except ImageNotFound:
+        logging.info(f"Installing docker image '{IMAGE_NAME}' from Docker Hub")
+        low_level_client = docker.APIClient()
+        for line in low_level_client.pull(IMAGE_NAME, stream=True, decode=True):
+            status = line.get("status")
+            progress = line.get("progress")
+            if status and progress:
+                logging.info(f"{status}: {progress}")
+            elif status:
+                logging.info(status)
+        logging.info(f"Image '{IMAGE_NAME}' installed")
+    return client
+
 
 async def execute_python_code(self, code: str, working_directory: str) -> str:
+    # Create working directory if it doesn't exist
+    if not os.path.exists(working_directory):
+        os.makedirs(working_directory)
     # Check if there are any package requirements in the code to install
     package_requirements = re.findall(r"pip install (.*)", code)
     if package_requirements:
@@ -22,25 +46,9 @@ async def execute_python_code(self, code: str, working_directory: str) -> str:
     with open(temp_file, "w") as f:
         f.write(code)
     try:
-        client = docker.from_env()
-        image_name = "joshxt/safeexecute:latest"
-        try:
-            client.images.get(image_name)
-            logging.info(f"Image '{image_name}' found locally")
-        except ImageNotFound:
-            logging.info(
-                f"Image '{image_name}' not found locally, pulling from Docker Hub"
-            )
-            low_level_client = docker.APIClient()
-            for line in low_level_client.pull(image_name, stream=True, decode=True):
-                status = line.get("status")
-                progress = line.get("progress")
-                if status and progress:
-                    logging.info(f"{status}: {progress}")
-                elif status:
-                    logging.info(status)
+        client = install_docker_image()
         container = client.containers.run(
-            image_name,
+            IMAGE_NAME,
             f"python {temp_file}",
             volumes={
                 os.path.abspath(working_directory): {
@@ -60,3 +68,7 @@ async def execute_python_code(self, code: str, working_directory: str) -> str:
         return logs
     except Exception as e:
         return f"Error: {str(e)}"
+
+
+if __name__ == "__main__":
+    install_docker_image()
