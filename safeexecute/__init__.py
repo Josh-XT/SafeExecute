@@ -43,7 +43,7 @@ async def execute_python_code(code: str, working_directory: str) -> str:
                         volumes={
                             os.path.abspath(working_directory): {
                                 "bind": "/workspace",
-                                "mode": "ro",
+                                "mode": "rw",
                             }
                         },
                         working_dir="/workspace",
@@ -61,7 +61,7 @@ async def execute_python_code(code: str, working_directory: str) -> str:
             volumes={
                 os.path.abspath(working_directory): {
                     "bind": "/workspace",
-                    "mode": "ro",
+                    "mode": "rw",
                 }
             },
             working_dir="/workspace",
