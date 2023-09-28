@@ -27,7 +27,7 @@ def install_docker_image():
     return client
 
 
-async def execute_python_code(self, code: str, working_directory: str) -> str:
+async def execute_python_code(code: str, working_directory: str) -> str:
     # Create working directory if it doesn't exist
     if not os.path.exists(working_directory):
         os.makedirs(working_directory)
@@ -40,7 +40,8 @@ async def execute_python_code(self, code: str, working_directory: str) -> str:
                 subprocess.check_output(["pip", "install", package])
             except:
                 pass
-    code = await self.get_python_code_from_response(code)
+    if "```python" in code:
+        code = code.split("```python")[1].split("```")[0]
     # Create a temporary Python file in the WORKSPACE directory
     temp_file = os.path.join(working_directory, "temp.py")
     with open(temp_file, "w") as f:
