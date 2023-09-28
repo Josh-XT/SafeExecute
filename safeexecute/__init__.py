@@ -1,9 +1,7 @@
 import os
 import re
 import logging
-import subprocess
 import docker
-from docker.errors import ImageNotFound
 
 IMAGE_NAME = "joshxt/safeexecute:latest"
 
@@ -13,16 +11,9 @@ def install_docker_image():
     try:
         client.images.get(IMAGE_NAME)
         logging.info(f"Image '{IMAGE_NAME}' found locally")
-    except ImageNotFound:
+    except:
         logging.info(f"Installing docker image '{IMAGE_NAME}' from Docker Hub")
-        low_level_client = docker.APIClient()
-        for line in low_level_client.pull(IMAGE_NAME, stream=True, decode=True):
-            status = line.get("status")
-            progress = line.get("progress")
-            if status and progress:
-                logging.info(f"{status}: {progress}")
-            elif status:
-                logging.info(status)
+        client.images.pull(IMAGE_NAME)
         logging.info(f"Image '{IMAGE_NAME}' installed")
     return client
 
@@ -33,13 +24,6 @@ async def execute_python_code(code: str, working_directory: str) -> str:
         os.makedirs(working_directory)
     # Check if there are any package requirements in the code to install
     package_requirements = re.findall(r"pip install (.*)", code)
-    if package_requirements:
-        # Install the required packages
-        for package in package_requirements:
-            try:
-                subprocess.check_output(["pip", "install", package])
-            except:
-                pass
     if "```python" in code:
         code = code.split("```python")[1].split("```")[0]
     # Create a temporary Python file in the WORKSPACE directory
@@ -48,6 +32,29 @@ async def execute_python_code(code: str, working_directory: str) -> str:
         f.write(code)
     try:
         client = install_docker_image()
+        if package_requirements:
+            # Install the required packages in the container
+            for package in package_requirements:
+                try:
+                    logging.info(f"Installing package '{package}' in container")
+                    client.containers.run(
+                        IMAGE_NAME,
+                        f"pip install {package}",
+                        volumes={
+                            os.path.abspath(working_directory): {
+                                "bind": "/workspace",
+                                "mode": "ro",
+                            }
+                        },
+                        working_dir="/workspace",
+                        stderr=True,
+                        stdout=True,
+                        detach=True,
+                    )
+                except Exception as e:
+                    logging.error(f"Error installing package '{package}': {str(e)}")
+                    return f"Error: {str(e)}"
+        # Run the Python code in the container
         container = client.containers.run(
             IMAGE_NAME,
             f"python {temp_file}",
@@ -66,8 +73,10 @@ async def execute_python_code(code: str, working_directory: str) -> str:
         logs = container.logs().decode("utf-8")
         container.remove()
         os.remove(temp_file)
+        logging.info(f"Python code executed successfully. Logs: {logs}")
         return logs
     except Exception as e:
+        logging.error(f"Error executing Python code: {str(e)}")
         return f"Error: {str(e)}"
 
 
