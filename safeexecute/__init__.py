@@ -18,15 +18,16 @@ def install_docker_image():
     return client
 
 
-def execute_python_code(code: str, working_directory: str) -> str:
-    # Create working directory if it doesn't exist
+def execute_python_code(code: str, working_directory: str = None) -> str:
+    if working_directory is None:
+        working_directory = os.path.join(os.getcwd(), "WORKSPACE")
     if not os.path.exists(working_directory):
         os.makedirs(working_directory)
     # Check if there are any package requirements in the code to install
     package_requirements = re.findall(r"pip install (.*)", code)
+    # Strip out python code blocks if they exist in the code
     if "```python" in code:
         code = code.split("```python")[1].split("```")[0]
-    # Create a temporary Python file in the WORKSPACE directory
     temp_file = os.path.join(working_directory, "temp.py")
     with open(temp_file, "w") as f:
         f.write(code)

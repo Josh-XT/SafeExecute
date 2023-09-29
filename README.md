@@ -18,15 +18,13 @@ pip install safeexecute
 
 ## Usage
 
-Set your working directory which is where any potential outputs of the code will be stored. This is also where the code will be executed.
+You can pass an entire message from a langauge model into the `code` field and it will parse out any Python code blocks and execute them.  If anywhere in the `code` says `pip install <package>`, it will install the package in the container before executing the code.
 
 ```python
-import os
 from safeexecute import execute_python_code
 
-working_directory = os.path.join(os.getcwd(), "WORKSPACE")
 code = "print('Hello, World!')"
 
-result = execute_python_code(code=code, working_directory=working_directory)
+result = execute_python_code(code=code)
 print(result)
 ```
