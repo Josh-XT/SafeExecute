@@ -21,10 +21,12 @@ pip install safeexecute
 Set your working directory which is where any potential outputs of the code will be stored. This is also where the code will be executed.
 
 ```python
+import os
 from safeexecute import execute_python_code
 
 working_directory = os.path.join(os.getcwd(), "WORKSPACE")
 code = "print('Hello, World!')"
 
 result = execute_python_code(code=code, working_directory=working_directory)
+print(result)
 ```

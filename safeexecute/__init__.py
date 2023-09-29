@@ -18,7 +18,7 @@ def install_docker_image():
     return client
 
 
-async def execute_python_code(code: str, working_directory: str) -> str:
+def execute_python_code(code: str, working_directory: str) -> str:
     # Create working directory if it doesn't exist
     if not os.path.exists(working_directory):
         os.makedirs(working_directory)
@@ -57,7 +57,7 @@ async def execute_python_code(code: str, working_directory: str) -> str:
         # Run the Python code in the container
         container = client.containers.run(
             IMAGE_NAME,
-            f"python {temp_file}",
+            f"python /workspace/temp.py",
             volumes={
                 os.path.abspath(working_directory): {
                     "bind": "/workspace",
