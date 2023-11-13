@@ -21,6 +21,9 @@ def install_docker_image():
 def execute_python_code(code: str, working_directory: str = None) -> str:
     if working_directory is None:
         working_directory = os.path.join(os.getcwd(), "WORKSPACE")
+    docker_working_dir = working_directory
+    if os.environ.get("DOCKER_CONTAINER", False):
+        docker_working_dir = os.environ.get("WORKING_DIRECTORY", working_directory)
     if not os.path.exists(working_directory):
         os.makedirs(working_directory)
     # Check if there are any package requirements in the code to install
@@ -43,7 +46,7 @@ def execute_python_code(code: str, working_directory: str = None) -> str:
                         IMAGE_NAME,
                         f"pip install {package}",
                         volumes={
-                            os.path.abspath(working_directory): {
+                            os.path.abspath(docker_working_dir): {
                                 "bind": "/workspace",
                                 "mode": "rw",
                             }
@@ -61,7 +64,7 @@ def execute_python_code(code: str, working_directory: str = None) -> str:
             IMAGE_NAME,
             f"python /workspace/temp.py",
             volumes={
-                os.path.abspath(working_directory): {
+                os.path.abspath(docker_working_dir): {
                     "bind": "/workspace",
                     "mode": "rw",
                 }

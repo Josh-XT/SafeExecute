@@ -35,7 +35,6 @@ You can pass an entire message from a langauge model into the `code` field and i
 from safeexecute import execute_python_code
 
 code = "print('Hello, World!')"
-
 result = execute_python_code(code=code)
 print(result)
 ```
