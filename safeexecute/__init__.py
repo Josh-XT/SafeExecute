@@ -31,6 +31,7 @@ def execute_python_code(code: str, working_directory: str = None) -> str:
     temp_file = os.path.join(working_directory, "temp.py")
     with open(temp_file, "w") as f:
         f.write(code)
+    os.chmod(temp_file, 0o755)  # Set executable permissions
     try:
         client = install_docker_image()
         if package_requirements:
@@ -69,6 +70,12 @@ def execute_python_code(code: str, working_directory: str = None) -> str:
             stderr=True,
             stdout=True,
             detach=True,
+        )
+        # Print the contents of the working directory inside the container
+        content = container.exec_run(["ls", "-l", "/workspace"])
+        print(
+            "Contents of /workspace inside the container:",
+            content.output.decode("utf-8"),
         )
         container.wait()
         logs = container.logs().decode("utf-8")
