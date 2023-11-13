@@ -6,9 +6,20 @@ This module provides a safe way to execute Python code in a container. It is int
 
 The container comes preloaded with the following packages:
 
-```bash
-numpy matplotlib seaborn scikit-learn yfinance scipy statsmodels sympy bokeh plotly dash networkx pyvis pandas
-```
+- numpy
+- matplotlib
+- seaborn
+- scikit-learn
+- yfinance
+- scipy
+- statsmodels
+- sympy
+- bokeh
+- plotly
+- dash
+- networkx
+- pyvis
+- pandas
 
 ## Installation
 
