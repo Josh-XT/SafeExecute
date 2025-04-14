@@ -20,6 +20,7 @@ The container comes preloaded with the following packages:
 - networkx
 - pyvis
 - pandas
+- agixtsdk
 
 ## Installation
 
