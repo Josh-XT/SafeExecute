@@ -18,13 +18,46 @@ def install_docker_image():
     return client
 
 
-def execute_python_code(code: str, working_directory: str = None) -> str:
+def execute_python_code(
+    code: str, working_directory: str = None, docker_host_directory: str = None
+) -> str:
+    """
+    Execute Python code safely in an isolated Docker container.
+
+    Args:
+        code: Python code to execute
+        working_directory: Directory where temp.py is written (container path if in Docker)
+        docker_host_directory: Host path corresponding to working_directory for Docker volume mount.
+                              If not provided and DOCKER_CONTAINER env is set, will attempt to
+                              translate using WORKING_DIRECTORY and CONTAINER_WORKING_DIRECTORY env vars.
+    """
     if working_directory is None:
         working_directory = os.path.join(os.getcwd(), "WORKSPACE")
+
+    # Determine the host path for Docker volume mounting
     docker_working_dir = working_directory
-    if os.environ.get("DOCKER_CONTAINER", False):
-        docker_working_dir = os.environ.get("WORKING_DIRECTORY", working_directory)
+    if os.environ.get("DOCKER_CONTAINER", "").lower() in ("true", "1", "yes"):
+        if docker_host_directory:
+            # Explicit host path provided
+            docker_working_dir = docker_host_directory
+        else:
+            # Try to translate container path to host path
+            host_workspace = os.environ.get("WORKING_DIRECTORY")
+            container_workspace = os.environ.get("CONTAINER_WORKING_DIRECTORY")
+            if (
+                host_workspace
+                and container_workspace
+                and working_directory.startswith(container_workspace)
+            ):
+                relative_path = working_directory[len(container_workspace) :].lstrip(
+                    "/"
+                )
+                docker_working_dir = os.path.join(host_workspace, relative_path)
+            elif host_workspace:
+                docker_working_dir = host_workspace
+
     if not os.path.exists(working_directory):
+        os.makedirs(working_directory)
         os.makedirs(working_directory)
     # Check if there are any package requirements in the code to install
     package_requirements = re.findall(r"pip install (.*)", code)
