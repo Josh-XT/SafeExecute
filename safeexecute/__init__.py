@@ -151,7 +151,8 @@ python /workspace/temp.py
             stdout=True,
             detach=True,
         )
-        container.wait()
+        result = container.wait()
+        exit_code = result.get("StatusCode", 0)
         logs = container.logs().decode("utf-8")
         container.remove()
 
@@ -161,11 +162,48 @@ python /workspace/temp.py
         if os.path.exists(wrapper_file):
             os.remove(wrapper_file)
 
-        logging.info(f"Python code executed successfully. Logs: {logs}")
-        return logs
+        # Check for errors in output and add guidance for the AI
+        error_indicators = [
+            "Traceback (most recent call last):",
+            "SyntaxError:",
+            "NameError:",
+            "TypeError:",
+            "ValueError:",
+            "KeyError:",
+            "IndexError:",
+            "AttributeError:",
+            "ImportError:",
+            "ModuleNotFoundError:",
+            "FileNotFoundError:",
+            "ZeroDivisionError:",
+            "RuntimeError:",
+            "Exception:",
+        ]
+
+        has_error = exit_code != 0 or any(
+            indicator in logs for indicator in error_indicators
+        )
+
+        if has_error:
+            logging.warning(f"Python code execution had errors. Logs: {logs}")
+            guidance = (
+                "\n\n---\n"
+                "**Code Execution Failed**: The code above produced an error. "
+                "Please analyze the error message, fix the code, and try again. "
+                "Common fixes include:\n"
+                "- Check column names match exactly (use df.columns to see available columns)\n"
+                "- Verify file paths and filenames exist\n"
+                "- Ensure required variables are defined before use\n"
+                "- Check data types match expected operations\n"
+                "- Handle missing or null values appropriately\n"
+            )
+            return logs + guidance
+        else:
+            logging.info(f"Python code executed successfully. Logs: {logs}")
+            return logs
     except Exception as e:
         logging.error(f"Error executing Python code: {str(e)}")
-        return f"Error: {str(e)}"
+        return f"Error: {str(e)}\n\n---\n**Execution Failed**: Please fix the issue and try again."
 
 
 if __name__ == "__main__":
