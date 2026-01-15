@@ -231,7 +231,7 @@ def execute_github_copilot(
         prompt: The prompt/request to send to GitHub Copilot
         github_token: Fine-grained GitHub PAT (github_pat_...) with "Copilot" account permission
         working_directory: The directory to mount as the workspace (default: WORKSPACE)
-        model: The model to use (default: claude-opus-4.5). Options: claude-opus-4.5, 
+        model: The model to use (default: claude-opus-4.5). Options: claude-opus-4.5,
                claude-sonnet-4, gpt-4.1, gpt-5, gpt-5-mini
         session_id: Optional session ID to resume an existing session. If provided,
                     Copilot will continue from where the previous session left off.
@@ -290,8 +290,10 @@ def execute_github_copilot(
         # Use -p for non-interactive prompt mode with --allow-all for full permissions
         cmd_parts = [
             "copilot",
-            "-p", prompt,
-            "--model", model,
+            "-p",
+            prompt,
+            "--model",
+            model,
             "--allow-all",  # Allow all tools, paths, and URLs
             "--no-auto-update",  # Don't check for updates
         ]
@@ -308,12 +310,17 @@ def execute_github_copilot(
             cmd += f" --resume {session_id}"
 
         if stream_callback:
-            stream_callback({"type": "info", "content": f"Starting GitHub Copilot with model {model}..."})
+            stream_callback(
+                {
+                    "type": "info",
+                    "content": f"Starting GitHub Copilot with model {model}...",
+                }
+            )
 
         # Run the CLI in the container
         container = client.containers.run(
             IMAGE_NAME,
-            f"bash -c \"{cmd}\"",
+            f'bash -c "{cmd}"',
             volumes={
                 os.path.abspath(docker_volume_path): {
                     "bind": "/workspace",
@@ -366,7 +373,9 @@ def execute_github_copilot(
         in_stats = False
         for line in full_output.split("\n"):
             # Stats section starts with "Total usage est:" or similar
-            if line.strip().startswith("Total usage est:") or line.strip().startswith("Total duration"):
+            if line.strip().startswith("Total usage est:") or line.strip().startswith(
+                "Total duration"
+            ):
                 in_stats = True
             if not in_stats:
                 response_lines.append(line)
@@ -374,7 +383,9 @@ def execute_github_copilot(
         response_text = "\n".join(response_lines).strip()
 
         if exit_code != 0:
-            logging.warning(f"GitHub Copilot execution had errors. Exit code: {exit_code}")
+            logging.warning(
+                f"GitHub Copilot execution had errors. Exit code: {exit_code}"
+            )
             # Check for common error patterns
             if "No authentication information found" in full_output:
                 response_text = (
@@ -391,7 +402,9 @@ def execute_github_copilot(
             }
 
         if stream_callback:
-            stream_callback({"type": "complete", "content": "GitHub Copilot completed successfully"})
+            stream_callback(
+                {"type": "complete", "content": "GitHub Copilot completed successfully"}
+            )
 
         logging.info("GitHub Copilot executed successfully")
         return {
