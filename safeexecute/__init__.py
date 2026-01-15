@@ -302,13 +302,6 @@ def execute_github_copilot(
         if session_id:
             cmd_parts.extend(["--resume", session_id])
 
-        # Join command for shell execution
-        # We need to properly escape the prompt for shell
-        escaped_prompt = prompt.replace("'", "'\"'\"'")
-        cmd = f"copilot -p '{escaped_prompt}' --model {model} --allow-all --no-auto-update"
-        if session_id:
-            cmd += f" --resume {session_id}"
-
         if stream_callback:
             stream_callback(
                 {
@@ -317,10 +310,20 @@ def execute_github_copilot(
                 }
             )
 
+        # Write prompt to a temp file to avoid shell escaping issues
+        prompt_file = os.path.join(working_directory, ".copilot_prompt.txt")
+        with open(prompt_file, "w") as f:
+            f.write(prompt)
+
+        # Build command that reads from the prompt file
+        cmd = f'copilot -p "$(cat /workspace/.copilot_prompt.txt)" --model {model} --allow-all --no-auto-update'
+        if session_id:
+            cmd += f" --resume {session_id}"
+
         # Run the CLI in the container
         container = client.containers.run(
             IMAGE_NAME,
-            f'bash -c "{cmd}"',
+            ["bash", "-c", cmd],
             volumes={
                 os.path.abspath(docker_volume_path): {
                     "bind": "/workspace",
@@ -364,6 +367,10 @@ def execute_github_copilot(
             exit_code = 1
 
         container.remove(force=True)
+
+        # Clean up the prompt file
+        if os.path.exists(prompt_file):
+            os.remove(prompt_file)
 
         # Parse the output
         full_output = "".join(all_output)
