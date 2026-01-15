@@ -315,10 +315,19 @@ def execute_github_copilot(
         with open(prompt_file, "w") as f:
             f.write(prompt)
 
-        # Build command that reads from the prompt file
-        cmd = f'copilot -p "$(cat /workspace/.copilot_prompt.txt)" --model {model} --allow-all --no-auto-update'
+        # Session file for capturing session ID
+        session_file = "/workspace/.copilot_session.md"
+
+        # Build command that reads from the prompt file and exports session
+        cmd = f'copilot -p "$(cat /workspace/.copilot_prompt.txt)" --model {model} --allow-all --no-auto-update --share {session_file}'
         if session_id:
             cmd += f" --resume {session_id}"
+
+        # Create a persistent config directory for Copilot sessions
+        # This allows session resumption across container runs
+        copilot_config_dir = os.path.join(working_directory, ".copilot_config")
+        if not os.path.exists(copilot_config_dir):
+            os.makedirs(copilot_config_dir)
 
         # Run the CLI in the container
         container = client.containers.run(
@@ -328,7 +337,11 @@ def execute_github_copilot(
                 os.path.abspath(docker_volume_path): {
                     "bind": "/workspace",
                     "mode": "rw",
-                }
+                },
+                os.path.abspath(copilot_config_dir): {
+                    "bind": "/root/.copilot",
+                    "mode": "rw",
+                },
             },
             working_dir="/workspace",
             environment={
@@ -344,7 +357,6 @@ def execute_github_copilot(
 
         # Collect output
         all_output = []
-        result_session_id = session_id  # Keep the session ID if resuming
 
         try:
             # Stream the container logs in real-time
@@ -371,6 +383,25 @@ def execute_github_copilot(
         # Clean up the prompt file
         if os.path.exists(prompt_file):
             os.remove(prompt_file)
+
+        # Parse session ID from the session markdown file
+        session_md_path = os.path.join(working_directory, ".copilot_session.md")
+        result_session_id = session_id  # Default to the input session_id
+        if os.path.exists(session_md_path):
+            try:
+                with open(session_md_path, "r") as f:
+                    session_content = f.read()
+                # Look for session ID pattern: > **Session ID:** `uuid`
+                import re
+
+                session_match = re.search(
+                    r"\*\*Session ID:\*\*\s*`([a-f0-9-]+)`", session_content
+                )
+                if session_match:
+                    result_session_id = session_match.group(1)
+                os.remove(session_md_path)
+            except Exception as e:
+                logging.warning(f"Error parsing session file: {str(e)}")
 
         # Parse the output
         full_output = "".join(all_output)
