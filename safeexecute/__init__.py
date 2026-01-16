@@ -5,9 +5,288 @@ import json
 import logging
 import docker
 import asyncio
+import time
+import threading
 from typing import Optional, Dict, Any, Callable
 
 IMAGE_NAME = "joshxt/safeexecute:latest"
+CONTAINER_TTL_SECONDS = 3600  # 60 minutes TTL for inactive containers
+
+
+class ConversationContainerManager:
+    """
+    Manages persistent Docker containers for conversations.
+
+    Each conversation gets its own container that persists across multiple
+    executions. Containers have a TTL and are automatically cleaned up
+    after being inactive for CONTAINER_TTL_SECONDS (60 minutes).
+
+    This ensures:
+    - Dependencies installed in one message persist for the next
+    - No overlap or leakage between conversations
+    - Efficient resource usage with automatic cleanup
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        self._initialized = True
+        self._containers: Dict[str, dict] = (
+            {}
+        )  # conversation_id -> {container, last_activity, volumes}
+        self._container_lock = threading.Lock()
+        self._cleanup_thread = None
+        self._running = True
+        self._start_cleanup_thread()
+        logging.info("ConversationContainerManager initialized")
+
+    def _start_cleanup_thread(self):
+        """Start background thread to clean up expired containers."""
+
+        def cleanup_loop():
+            while self._running:
+                try:
+                    self._cleanup_expired_containers()
+                except Exception as e:
+                    logging.debug(f"Error in cleanup thread: {e}")
+                # Check every 60 seconds
+                for _ in range(60):
+                    if not self._running:
+                        break
+                    time.sleep(1)
+
+        self._cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+        self._cleanup_thread.start()
+
+    def _cleanup_expired_containers(self):
+        """Remove containers that have been inactive beyond TTL."""
+        current_time = time.time()
+        expired = []
+
+        with self._container_lock:
+            for conv_id, info in self._containers.items():
+                if current_time - info["last_activity"] > CONTAINER_TTL_SECONDS:
+                    expired.append(conv_id)
+
+        for conv_id in expired:
+            logging.info(f"Cleaning up expired container for conversation {conv_id}")
+            self.remove_container(conv_id)
+
+    def get_or_create_container(
+        self,
+        conversation_id: str,
+        working_directory: str,
+        docker_volume_path: str,
+        github_token: str = None,
+    ) -> tuple:
+        """
+        Get existing container or create a new one for the conversation.
+
+        Returns:
+            tuple: (container, is_new) - the container and whether it was newly created
+        """
+        with self._container_lock:
+            if conversation_id in self._containers:
+                info = self._containers[conversation_id]
+                info["last_activity"] = time.time()
+
+                # Check if container is still running
+                try:
+                    info["container"].reload()
+                    if info["container"].status == "running":
+                        logging.info(
+                            f"Reusing existing container for conversation {conversation_id}"
+                        )
+                        return info["container"], False
+                    else:
+                        # Container stopped, remove and recreate
+                        logging.info(
+                            f"Container for {conversation_id} stopped, recreating"
+                        )
+                        try:
+                            info["container"].remove(force=True)
+                        except:
+                            pass
+                        del self._containers[conversation_id]
+                except Exception as e:
+                    logging.debug(f"Error checking container: {e}")
+                    try:
+                        info["container"].remove(force=True)
+                    except:
+                        pass
+                    del self._containers[conversation_id]
+
+        # Create new container
+        return (
+            self._create_container(
+                conversation_id, working_directory, docker_volume_path, github_token
+            ),
+            True,
+        )
+
+    def _create_container(
+        self,
+        conversation_id: str,
+        working_directory: str,
+        docker_volume_path: str,
+        github_token: str = None,
+    ):
+        """Create a new persistent container for a conversation."""
+        client = docker.from_env()
+
+        # Ensure image exists
+        try:
+            client.images.get(IMAGE_NAME)
+        except:
+            logging.info(f"Pulling image {IMAGE_NAME}")
+            client.images.pull(IMAGE_NAME)
+
+        # Create copilot config directory for session persistence
+        copilot_config_dir = os.path.join(working_directory, ".copilot_config")
+        if not os.path.exists(copilot_config_dir):
+            os.makedirs(copilot_config_dir)
+
+        # Build environment
+        env = {
+            "HOME": "/root",
+            "PYTHONUNBUFFERED": "1",
+            "CONVERSATION_ID": conversation_id,
+        }
+        if github_token:
+            env.update(
+                {
+                    "GITHUB_TOKEN": github_token,
+                    "GH_TOKEN": github_token,
+                    "COPILOT_GITHUB_TOKEN": github_token,
+                }
+            )
+
+        # Container name for easy identification
+        container_name = f"safeexecute-{conversation_id[:12]}"
+
+        # Remove any existing container with this name
+        try:
+            old_container = client.containers.get(container_name)
+            old_container.remove(force=True)
+        except:
+            pass
+
+        # Create a long-running container that stays alive
+        # We'll exec commands into it rather than running one-shot containers
+        container = client.containers.run(
+            IMAGE_NAME,
+            ["bash", "-c", "while true; do sleep 30; done"],  # Keep alive
+            name=container_name,
+            volumes={
+                os.path.abspath(docker_volume_path): {
+                    "bind": "/workspace",
+                    "mode": "rw",
+                },
+                os.path.abspath(copilot_config_dir): {
+                    "bind": "/root/.copilot",
+                    "mode": "rw",
+                },
+            },
+            working_dir="/workspace",
+            environment=env,
+            detach=True,
+            tty=True,
+            stdin_open=True,
+        )
+
+        with self._container_lock:
+            self._containers[conversation_id] = {
+                "container": container,
+                "last_activity": time.time(),
+                "working_directory": working_directory,
+                "docker_volume_path": docker_volume_path,
+            }
+
+        logging.info(
+            f"Created new persistent container {container_name} for conversation {conversation_id}"
+        )
+        return container
+
+    def update_activity(self, conversation_id: str):
+        """Update last activity time for a conversation's container."""
+        with self._container_lock:
+            if conversation_id in self._containers:
+                self._containers[conversation_id]["last_activity"] = time.time()
+
+    def remove_container(self, conversation_id: str):
+        """Remove and cleanup a conversation's container."""
+        with self._container_lock:
+            if conversation_id in self._containers:
+                info = self._containers.pop(conversation_id)
+                try:
+                    info["container"].remove(force=True)
+                    logging.info(
+                        f"Removed container for conversation {conversation_id}"
+                    )
+                except Exception as e:
+                    logging.debug(f"Error removing container: {e}")
+
+    def get_container_info(self, conversation_id: str) -> Optional[dict]:
+        """Get info about a conversation's container."""
+        with self._container_lock:
+            if conversation_id in self._containers:
+                info = self._containers[conversation_id].copy()
+                info["ttl_remaining"] = max(
+                    0, CONTAINER_TTL_SECONDS - (time.time() - info["last_activity"])
+                )
+                return info
+        return None
+
+    def list_containers(self) -> Dict[str, dict]:
+        """List all managed containers with their info."""
+        result = {}
+        with self._container_lock:
+            for conv_id, info in self._containers.items():
+                result[conv_id] = {
+                    "container_id": info["container"].id[:12],
+                    "last_activity": info["last_activity"],
+                    "ttl_remaining": max(
+                        0, CONTAINER_TTL_SECONDS - (time.time() - info["last_activity"])
+                    ),
+                }
+        return result
+
+    def shutdown(self):
+        """Shutdown the manager and cleanup all containers."""
+        self._running = False
+        with self._container_lock:
+            for conv_id in list(self._containers.keys()):
+                try:
+                    self._containers[conv_id]["container"].remove(force=True)
+                except:
+                    pass
+            self._containers.clear()
+        logging.info("ConversationContainerManager shutdown complete")
+
+
+# Global container manager instance
+_container_manager: Optional[ConversationContainerManager] = None
+
+
+def get_container_manager() -> ConversationContainerManager:
+    """Get the global container manager instance."""
+    global _container_manager
+    if _container_manager is None:
+        _container_manager = ConversationContainerManager()
+    return _container_manager
+
 
 # Common import name to package name mappings
 IMPORT_TO_PACKAGE = {
@@ -216,6 +495,7 @@ def execute_github_copilot(
     model: str = "claude-opus-4.5",
     session_id: str = None,
     stream_callback: callable = None,
+    conversation_id: str = None,
 ) -> dict:
     """
     Execute a prompt using GitHub Copilot CLI within a Docker container.
@@ -238,6 +518,10 @@ def execute_github_copilot(
         stream_callback: Optional callback function that receives streaming events.
                          The callback receives a dict with 'type' and 'content' keys.
                          Event types: 'output', 'error', 'complete'
+        conversation_id: Optional conversation ID for persistent containers. When provided,
+                         the container persists across multiple executions in the same
+                         conversation, preserving installed dependencies and state.
+                         Containers have a 60-minute TTL when inactive.
 
     Returns:
         dict: A dictionary containing:
@@ -502,6 +786,11 @@ def execute_github_copilot(
     if not os.path.exists(working_directory):
         os.makedirs(working_directory)
 
+    # Track whether we're using a persistent container
+    use_persistent_container = conversation_id is not None
+    persistent_container = None
+    is_new_container = False
+
     try:
         client = install_docker_image()
 
@@ -521,11 +810,23 @@ def execute_github_copilot(
         if session_id:
             cmd_parts.extend(["--resume", session_id])
 
+        container_info_msg = ""
+        if use_persistent_container:
+            manager = get_container_manager()
+            container_info = manager.get_container_info(conversation_id)
+            if container_info:
+                ttl_mins = int(container_info["ttl_remaining"] / 60)
+                container_info_msg = (
+                    f" (persistent container, {ttl_mins}m TTL remaining)"
+                )
+            else:
+                container_info_msg = " (creating new persistent container)"
+
         if stream_callback:
             stream_callback(
                 {
                     "type": "info",
-                    "content": f"🚀 **Starting GitHub Copilot** with model `{model}`\n",
+                    "content": f"🚀 **Starting GitHub Copilot** with model `{model}`{container_info_msg}\n",
                 }
             )
 
@@ -557,316 +858,467 @@ def execute_github_copilot(
         # This ensures copilot output is flushed immediately
         unbuffered_cmd = f"stdbuf -oL -eL {cmd}"
 
-        # Run the CLI in the container with pseudo-TTY for streaming
-        container = client.containers.run(
-            IMAGE_NAME,
-            ["bash", "-c", unbuffered_cmd],
-            volumes={
-                os.path.abspath(docker_volume_path): {
-                    "bind": "/workspace",
-                    "mode": "rw",
-                },
-                os.path.abspath(copilot_config_dir): {
-                    "bind": "/root/.copilot",
-                    "mode": "rw",
-                },
-            },
-            working_dir="/workspace",
-            environment={
-                "HOME": "/root",
-                "GITHUB_TOKEN": github_token,
-                "GH_TOKEN": github_token,
-                "COPILOT_GITHUB_TOKEN": github_token,
-                # Force unbuffered Python output if copilot uses Python
-                "PYTHONUNBUFFERED": "1",
-            },
-            stderr=True,
-            stdout=True,
-            detach=True,
-            tty=True,  # Enable TTY for streaming output
-        )
-
-        # Collect output and buffer for line-based streaming
-        all_output = []
-        line_buffer = ""
-        last_emit_time = 0
-        import time
-
-        def emit_buffered_content(content: str, force: bool = False):
-            """Emit buffered content as appropriate event types."""
-            nonlocal last_emit_time
-            if not stream_callback or not content.strip():
-                return
-
-            current_time = time.time()
-            # Rate limit to avoid spamming - emit at most every 0.1 seconds unless forced
-            if not force and (current_time - last_emit_time) < 0.1:
-                return
-
-            stripped = content.strip()
-            if not stripped:
-                return
-
-            last_emit_time = current_time
-
-            # Skip stats and metadata lines
-            if any(
-                stripped.startswith(s)
-                for s in ["Total ", "Usage by", "Session exported"]
-            ):
-                return
-
-            lower_content = stripped.lower()
-
-            # Patterns that should have a line break BEFORE them (major transitions)
-            linebreak_before_patterns = [
-                "cloning",
-                "clone ",
-                "intent:",
-                "i'll clone",
-                "let me clone",
-                "i'll start by",
-                "first, i'll",
-                "i will ",
-                "let me ",
-                "now i'll",
-                "next, i'll",
-                "analyzing",
-                "examining",
-            ]
-
-            # Check if we need a line break before this content
-            needs_linebreak = any(
-                pattern in lower_content for pattern in linebreak_before_patterns
+        if use_persistent_container:
+            # Use the container manager for persistent per-conversation containers
+            manager = get_container_manager()
+            persistent_container, is_new_container = manager.get_or_create_container(
+                conversation_id=conversation_id,
+                working_directory=working_directory,
+                docker_volume_path=docker_volume_path,
+                github_token=github_token,
             )
-            prefix = "\n" if needs_linebreak else ""
 
-            # Detect tool execution patterns - starting an operation
-            tool_start_patterns = [
-                "reading file",
-                "reading `",
-                "writing file",
-                "writing to",
-                "creating file",
-                "creating `",
-                "modifying",
-                "deleting",
-                "searching",
-                "running command",
-                "executing",
-                "checking",
-                "analyzing",
-                "scanning",
-                "cloning",
-                "fetching",
-                "pulling",
-                "pushing",
-                "committing",
-                "staging",
-                "looking at",
-                "examining",
-                "inspecting",
-                "opening",
-                "loading",
-                "parsing",
-                "processing",
-                "building",
-                "compiling",
-                "installing",
-                "downloading",
-                "git clone",
-                "git pull",
-                "git push",
-                "git checkout",
-                "npm install",
-                "pip install",
-                "cargo build",
-            ]
-
-            # Detect tool completion patterns - these get a newline before them
-            tool_complete_patterns = [
-                "created `",
-                "wrote to",
-                "modified `",
-                "deleted",
-                "found",
-                "completed",
-                "successfully",
-                "done",
-                "finished",
-                "updated `",
-                "cloned",
-                "fetched",
-                "pulled",
-                "pushed",
-                "committed",
-                "installed",
-                "downloaded",
-                "built",
-                "compiled",
-                "here's",
-                "here is",
-                "i've ",
-                "i have ",
-            ]
-
-            # Detect intent/thinking patterns
-            intent_patterns = [
-                "let me ",
-                "i'll ",
-                "i will ",
-                "now i",
-                "first,",
-                "next,",
-                "intent:",
-                "plan:",
-                "approach:",
-            ]
-
-            if any(pattern in lower_content for pattern in tool_start_patterns):
-                stream_callback(
-                    {"type": "tool_start", "content": f"{prefix}{stripped}"}
-                )
-            elif any(pattern in lower_content for pattern in tool_complete_patterns):
-                # Tool completions get a newline before them for visual separation
-                stream_callback({"type": "tool_complete", "content": f"\n{stripped}"})
-            elif stripped.lower().startswith("error") or "error:" in lower_content:
-                stream_callback({"type": "error", "content": stripped})
-            elif any(pattern in lower_content for pattern in intent_patterns):
-                stream_callback(
-                    {"type": "thinking", "content": f"{prefix}💭 {stripped}"}
-                )
-            else:
-                # Stream as thinking for all other meaningful content
-                stream_callback({"type": "thinking", "content": stripped})
-
-        try:
-            # Use attach with a socket for true real-time streaming
-            # The logs() API buffers when TTY is enabled
-            socket = container.attach_socket(
-                params={"stdout": True, "stderr": True, "stream": True}
+            # Update environment with current GitHub token (in case it changed)
+            # Execute command in the persistent container
+            # exec_run with stream=True returns (exit_code, output_generator)
+            exec_instance = persistent_container.client.api.exec_create(
+                persistent_container.id,
+                ["bash", "-c", unbuffered_cmd],
+                workdir="/workspace",
+                environment={
+                    "GITHUB_TOKEN": github_token,
+                    "GH_TOKEN": github_token,
+                    "COPILOT_GITHUB_TOKEN": github_token,
+                },
+                tty=True,
             )
-            socket._sock.setblocking(False)
 
-            import select
-            import time as time_module
+            # Start exec and get streaming output
+            output_generator = persistent_container.client.api.exec_start(
+                exec_instance["Id"],
+                stream=True,
+                tty=True,
+            )
 
-            start_time = time_module.time()
-            timeout = 3600  # 1 hour max
+            # Stream output from exec
+            all_output = []
+            line_buffer = ""
+            last_emit_time = 0
 
-            # Track log file positions for incremental reading
+            # Define emit_buffered_content for persistent container mode
+            def emit_buffered_content(content: str, force: bool = False):
+                """Emit buffered content as appropriate event types."""
+                nonlocal last_emit_time
+                if not stream_callback or not content.strip():
+                    return
+
+                current_time = time.time()
+                if not force and (current_time - last_emit_time) < 0.1:
+                    return
+
+                stripped = content.strip()
+                if not stripped:
+                    return
+
+                last_emit_time = current_time
+
+                if any(
+                    stripped.startswith(s)
+                    for s in ["Total ", "Usage by", "Session exported"]
+                ):
+                    return
+
+                lower_content = stripped.lower()
+                linebreak_before_patterns = [
+                    "cloning",
+                    "clone ",
+                    "intent:",
+                    "i'll clone",
+                    "let me clone",
+                    "i'll start by",
+                    "first, i'll",
+                    "i will ",
+                    "let me ",
+                    "now i'll",
+                    "next, i'll",
+                    "analyzing",
+                    "examining",
+                ]
+                needs_linebreak = any(
+                    pattern in lower_content for pattern in linebreak_before_patterns
+                )
+                prefix = "\n" if needs_linebreak else ""
+
+                tool_start_patterns = [
+                    "reading file",
+                    "reading `",
+                    "writing file",
+                    "writing to",
+                    "creating file",
+                    "creating `",
+                    "modifying",
+                    "deleting",
+                    "searching",
+                    "running command",
+                    "executing",
+                    "checking",
+                    "analyzing",
+                    "scanning",
+                    "cloning",
+                    "fetching",
+                    "pulling",
+                    "pushing",
+                    "committing",
+                    "staging",
+                    "looking at",
+                    "examining",
+                ]
+                tool_complete_patterns = [
+                    "created `",
+                    "wrote to",
+                    "modified `",
+                    "deleted",
+                    "found",
+                    "completed",
+                    "successfully",
+                    "done",
+                    "finished",
+                    "updated `",
+                    "cloned",
+                    "fetched",
+                    "pulled",
+                    "pushed",
+                    "committed",
+                ]
+                intent_patterns = [
+                    "let me ",
+                    "i'll ",
+                    "i will ",
+                    "now i",
+                    "first,",
+                    "next,",
+                    "intent:",
+                    "plan:",
+                    "approach:",
+                ]
+
+                if any(pattern in lower_content for pattern in tool_start_patterns):
+                    stream_callback(
+                        {"type": "tool_start", "content": f"{prefix}{stripped}"}
+                    )
+                elif any(
+                    pattern in lower_content for pattern in tool_complete_patterns
+                ):
+                    stream_callback(
+                        {"type": "tool_complete", "content": f"\n{stripped}"}
+                    )
+                elif stripped.lower().startswith("error") or "error:" in lower_content:
+                    stream_callback({"type": "error", "content": stripped})
+                elif any(pattern in lower_content for pattern in intent_patterns):
+                    stream_callback(
+                        {"type": "thinking", "content": f"{prefix}💭 {stripped}"}
+                    )
+                else:
+                    stream_callback({"type": "thinking", "content": stripped})
+
+            # Track log file positions
             log_positions = {}
             copilot_log_dir = os.path.join(working_directory, ".copilot_logs")
             last_log_check = 0
 
-            while True:
-                # Check if container is still running
-                container.reload()
-                if container.status != "running":
-                    # Get any remaining output
-                    try:
-                        while True:
-                            ready, _, _ = select.select([socket._sock], [], [], 0.1)
-                            if ready:
-                                data = socket._sock.recv(4096)
-                                if data:
-                                    chunk_str = data.decode("utf-8", errors="replace")
-                                    all_output.append(chunk_str)
-                                    line_buffer += chunk_str
-                                    while "\n" in line_buffer or "\r" in line_buffer:
-                                        if "\n" in line_buffer:
-                                            line, line_buffer = line_buffer.split(
-                                                "\n", 1
-                                            )
-                                        else:
-                                            line, line_buffer = line_buffer.split(
-                                                "\r", 1
-                                            )
-                                        emit_buffered_content(line, force=True)
-                                else:
-                                    break
-                            else:
-                                break
-                    except:
-                        pass
-                    # Final log parse
-                    parse_tool_calls_from_logs(
-                        copilot_log_dir, log_positions, stream_callback
-                    )
-                    break
-
-                # Check for timeout
-                if time_module.time() - start_time > timeout:
-                    logging.warning("Container execution timed out")
-                    break
-
-                # Parse log files for tool calls every 0.5 seconds
-                current_time = time_module.time()
-                if current_time - last_log_check >= 0.5:
-                    parse_tool_calls_from_logs(
-                        copilot_log_dir, log_positions, stream_callback
-                    )
-                    last_log_check = current_time
-
-                # Try to read from socket with timeout
-                try:
-                    ready, _, _ = select.select([socket._sock], [], [], 0.5)
-                    if ready:
-                        data = socket._sock.recv(4096)
-                        if data:
-                            chunk_str = data.decode("utf-8", errors="replace")
-                            all_output.append(chunk_str)
-                            line_buffer += chunk_str
-
-                            # Process complete lines
-                            while "\n" in line_buffer or "\r" in line_buffer:
-                                if "\n" in line_buffer:
-                                    line, line_buffer = line_buffer.split("\n", 1)
-                                else:
-                                    line, line_buffer = line_buffer.split("\r", 1)
-                                emit_buffered_content(line, force=True)
-
-                            # Emit partial content for long buffers
-                            if len(line_buffer) > 200:
-                                emit_buffered_content(line_buffer)
-                except BlockingIOError:
-                    pass
-                except Exception as e:
-                    logging.debug(f"Socket read error: {e}")
-
-            socket.close()
-
-        except Exception as e:
-            logging.warning(f"Error streaming logs: {str(e)}")
-            # Fallback to logs() if socket approach fails
-            try:
-                for log_chunk in container.logs(stream=True, follow=True):
-                    chunk_str = log_chunk.decode("utf-8", errors="replace")
+            for chunk in output_generator:
+                if chunk:
+                    chunk_str = chunk.decode("utf-8", errors="replace")
                     all_output.append(chunk_str)
                     line_buffer += chunk_str
+
                     while "\n" in line_buffer or "\r" in line_buffer:
                         if "\n" in line_buffer:
                             line, line_buffer = line_buffer.split("\n", 1)
                         else:
                             line, line_buffer = line_buffer.split("\r", 1)
                         emit_buffered_content(line, force=True)
-            except Exception as e2:
-                logging.warning(f"Fallback streaming also failed: {e2}")
 
-        # Emit any remaining buffered content
-        if line_buffer.strip():
-            emit_buffered_content(line_buffer, force=True)
+                    # Parse logs periodically
+                    current_time = time.time()
+                    if current_time - last_log_check >= 0.5:
+                        parse_tool_calls_from_logs(
+                            copilot_log_dir, log_positions, stream_callback
+                        )
+                        last_log_check = current_time
 
-        # Wait for container to finish
-        try:
-            wait_result = container.wait(timeout=3630)  # 60 minutes + 30 seconds buffer
-            exit_code = wait_result.get("StatusCode", 0)
-        except Exception as e:
-            logging.warning(f"Container wait timeout: {str(e)}")
-            exit_code = 1
+            # Final log parse
+            parse_tool_calls_from_logs(copilot_log_dir, log_positions, stream_callback)
 
-        container.remove(force=True)
+            # Emit remaining buffer
+            if line_buffer.strip():
+                emit_buffered_content(line_buffer, force=True)
 
+            # Update activity timestamp
+            manager.update_activity(conversation_id)
+
+            # Get exit code from exec
+            exec_inspect = persistent_container.client.api.exec_inspect(
+                exec_instance["Id"]
+            )
+            exit_code = exec_inspect.get("ExitCode", 0)
+
+        else:
+            # Original one-shot container behavior for backward compatibility
+            container = client.containers.run(
+                IMAGE_NAME,
+                ["bash", "-c", unbuffered_cmd],
+                volumes={
+                    os.path.abspath(docker_volume_path): {
+                        "bind": "/workspace",
+                        "mode": "rw",
+                    },
+                    os.path.abspath(copilot_config_dir): {
+                        "bind": "/root/.copilot",
+                        "mode": "rw",
+                    },
+                },
+                working_dir="/workspace",
+                environment={
+                    "HOME": "/root",
+                    "GITHUB_TOKEN": github_token,
+                    "GH_TOKEN": github_token,
+                    "COPILOT_GITHUB_TOKEN": github_token,
+                    "PYTHONUNBUFFERED": "1",
+                },
+                stderr=True,
+                stdout=True,
+                detach=True,
+                tty=True,
+            )
+
+            # Collect output and buffer for line-based streaming for one-shot container
+            all_output = []
+            line_buffer = ""
+            last_emit_time = 0
+
+            def emit_buffered_content(content: str, force: bool = False):
+                """Emit buffered content as appropriate event types."""
+                nonlocal last_emit_time
+                if not stream_callback or not content.strip():
+                    return
+
+                current_time = time.time()
+                if not force and (current_time - last_emit_time) < 0.1:
+                    return
+
+                stripped = content.strip()
+                if not stripped:
+                    return
+
+                last_emit_time = current_time
+
+                if any(
+                    stripped.startswith(s)
+                    for s in ["Total ", "Usage by", "Session exported"]
+                ):
+                    return
+
+                lower_content = stripped.lower()
+                linebreak_before_patterns = [
+                    "cloning",
+                    "clone ",
+                    "intent:",
+                    "i'll clone",
+                    "let me clone",
+                    "i'll start by",
+                    "first, i'll",
+                    "i will ",
+                    "let me ",
+                    "now i'll",
+                    "next, i'll",
+                    "analyzing",
+                    "examining",
+                ]
+                needs_linebreak = any(
+                    pattern in lower_content for pattern in linebreak_before_patterns
+                )
+                prefix = "\n" if needs_linebreak else ""
+
+                tool_start_patterns = [
+                    "reading file",
+                    "reading `",
+                    "writing file",
+                    "writing to",
+                    "creating file",
+                    "creating `",
+                    "modifying",
+                    "deleting",
+                    "searching",
+                    "running command",
+                    "executing",
+                    "checking",
+                    "analyzing",
+                    "scanning",
+                    "cloning",
+                    "fetching",
+                    "pulling",
+                    "pushing",
+                    "committing",
+                    "staging",
+                    "looking at",
+                    "examining",
+                ]
+                tool_complete_patterns = [
+                    "created `",
+                    "wrote to",
+                    "modified `",
+                    "deleted",
+                    "found",
+                    "completed",
+                    "successfully",
+                    "done",
+                    "finished",
+                    "updated `",
+                    "cloned",
+                    "fetched",
+                    "pulled",
+                    "pushed",
+                    "committed",
+                ]
+                intent_patterns = [
+                    "let me ",
+                    "i'll ",
+                    "i will ",
+                    "now i",
+                    "first,",
+                    "next,",
+                    "intent:",
+                    "plan:",
+                    "approach:",
+                ]
+
+                if any(pattern in lower_content for pattern in tool_start_patterns):
+                    stream_callback(
+                        {"type": "tool_start", "content": f"{prefix}{stripped}"}
+                    )
+                elif any(
+                    pattern in lower_content for pattern in tool_complete_patterns
+                ):
+                    stream_callback(
+                        {"type": "tool_complete", "content": f"\n{stripped}"}
+                    )
+                elif stripped.lower().startswith("error") or "error:" in lower_content:
+                    stream_callback({"type": "error", "content": stripped})
+                elif any(pattern in lower_content for pattern in intent_patterns):
+                    stream_callback(
+                        {"type": "thinking", "content": f"{prefix}💭 {stripped}"}
+                    )
+                else:
+                    stream_callback({"type": "thinking", "content": stripped})
+
+            try:
+                # Use attach with a socket for true real-time streaming
+                socket = container.attach_socket(
+                    params={"stdout": True, "stderr": True, "stream": True}
+                )
+                socket._sock.setblocking(False)
+
+                import select
+                import time as time_module
+
+                start_time = time_module.time()
+                timeout = 3600  # 1 hour max
+
+                log_positions = {}
+                copilot_log_dir = os.path.join(working_directory, ".copilot_logs")
+                last_log_check = 0
+
+                while True:
+                    container.reload()
+                    if container.status != "running":
+                        try:
+                            while True:
+                                ready, _, _ = select.select([socket._sock], [], [], 0.1)
+                                if ready:
+                                    data = socket._sock.recv(4096)
+                                    if data:
+                                        chunk_str = data.decode(
+                                            "utf-8", errors="replace"
+                                        )
+                                        all_output.append(chunk_str)
+                                        line_buffer += chunk_str
+                                        while (
+                                            "\n" in line_buffer or "\r" in line_buffer
+                                        ):
+                                            if "\n" in line_buffer:
+                                                line, line_buffer = line_buffer.split(
+                                                    "\n", 1
+                                                )
+                                            else:
+                                                line, line_buffer = line_buffer.split(
+                                                    "\r", 1
+                                                )
+                                            emit_buffered_content(line, force=True)
+                                    else:
+                                        break
+                                else:
+                                    break
+                        except:
+                            pass
+                        parse_tool_calls_from_logs(
+                            copilot_log_dir, log_positions, stream_callback
+                        )
+                        break
+
+                    if time_module.time() - start_time > timeout:
+                        logging.warning("Container execution timed out")
+                        break
+
+                    current_time = time_module.time()
+                    if current_time - last_log_check >= 0.5:
+                        parse_tool_calls_from_logs(
+                            copilot_log_dir, log_positions, stream_callback
+                        )
+                        last_log_check = current_time
+
+                    try:
+                        ready, _, _ = select.select([socket._sock], [], [], 0.5)
+                        if ready:
+                            data = socket._sock.recv(4096)
+                            if data:
+                                chunk_str = data.decode("utf-8", errors="replace")
+                                all_output.append(chunk_str)
+                                line_buffer += chunk_str
+                                while "\n" in line_buffer or "\r" in line_buffer:
+                                    if "\n" in line_buffer:
+                                        line, line_buffer = line_buffer.split("\n", 1)
+                                    else:
+                                        line, line_buffer = line_buffer.split("\r", 1)
+                                    emit_buffered_content(line, force=True)
+                                if len(line_buffer) > 200:
+                                    emit_buffered_content(line_buffer)
+                    except BlockingIOError:
+                        pass
+                    except Exception as e:
+                        logging.debug(f"Socket read error: {e}")
+
+                socket.close()
+
+            except Exception as e:
+                logging.warning(f"Error streaming logs: {str(e)}")
+                try:
+                    for log_chunk in container.logs(stream=True, follow=True):
+                        chunk_str = log_chunk.decode("utf-8", errors="replace")
+                        all_output.append(chunk_str)
+                        line_buffer += chunk_str
+                        while "\n" in line_buffer or "\r" in line_buffer:
+                            if "\n" in line_buffer:
+                                line, line_buffer = line_buffer.split("\n", 1)
+                            else:
+                                line, line_buffer = line_buffer.split("\r", 1)
+                            emit_buffered_content(line, force=True)
+                except Exception as e2:
+                    logging.warning(f"Fallback streaming also failed: {e2}")
+
+            if line_buffer.strip():
+                emit_buffered_content(line_buffer, force=True)
+
+            try:
+                wait_result = container.wait(timeout=3630)
+                exit_code = wait_result.get("StatusCode", 0)
+            except Exception as e:
+                logging.warning(f"Container wait timeout: {str(e)}")
+                exit_code = 1
+
+            container.remove(force=True)
+
+        # Common post-processing for both persistent and one-shot containers
         # Clean up the prompt file
         if os.path.exists(prompt_file):
             os.remove(prompt_file)
@@ -888,9 +1340,6 @@ def execute_github_copilot(
             try:
                 with open(session_md_path, "r") as f:
                     session_content = f.read()
-                # Look for session ID pattern: > **Session ID:** `uuid`
-                import re
-
                 session_match = re.search(
                     r"\*\*Session ID:\*\*\s*`([a-f0-9-]+)`", session_content
                 )
@@ -907,7 +1356,6 @@ def execute_github_copilot(
         response_lines = []
         in_stats = False
         for line in full_output.split("\n"):
-            # Stats section starts with "Total usage est:" or similar
             if line.strip().startswith("Total usage est:") or line.strip().startswith(
                 "Total duration"
             ):
@@ -921,7 +1369,6 @@ def execute_github_copilot(
             logging.warning(
                 f"GitHub Copilot execution had errors. Exit code: {exit_code}"
             )
-            # Check for common error patterns
             if "No authentication information found" in full_output:
                 response_text = (
                     "Authentication failed. Please ensure your token:\n"
