@@ -245,6 +245,225 @@ def execute_github_copilot(
             - 'session_id': The session ID (can be used to resume this session)
             - 'success': Boolean indicating if the operation was successful
     """
+    import json
+    import re
+    import threading
+    import glob
+
+    def parse_tool_calls_from_logs(
+        log_dir: str, last_position: dict, stream_callback
+    ) -> None:
+        """Parse log files for tool calls and stream them."""
+        if not stream_callback or not os.path.exists(log_dir):
+            return
+
+        log_files = glob.glob(os.path.join(log_dir, "*.log"))
+        for log_file in log_files:
+            try:
+                file_key = os.path.basename(log_file)
+                if file_key not in last_position:
+                    last_position[file_key] = 0
+
+                with open(log_file, "r") as f:
+                    f.seek(last_position[file_key])
+                    new_content = f.read()
+                    last_position[file_key] = f.tell()
+
+                if not new_content:
+                    continue
+
+                # Parse tool calls from the log content
+                # Look for tool_calls in JSON responses
+                tool_call_pattern = r'"tool_calls":\s*\[(.*?)\]'
+                for match in re.finditer(tool_call_pattern, new_content, re.DOTALL):
+                    try:
+                        tool_calls_str = "[" + match.group(1) + "]"
+                        # Clean up the JSON
+                        tool_calls_str = re.sub(r"\s+", " ", tool_calls_str)
+                        tool_calls = json.loads(tool_calls_str)
+
+                        for tool_call in tool_calls:
+                            func = tool_call.get("function", {})
+                            func_name = func.get("name", "unknown")
+                            func_args_str = func.get("arguments", "{}")
+
+                            try:
+                                func_args = json.loads(func_args_str)
+                            except:
+                                func_args = {"raw": func_args_str}
+
+                            # Format the tool call for display
+                            if func_name == "bash":
+                                cmd = func_args.get("command", "")
+                                desc = func_args.get("description", "Running command")
+                                stream_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "content": f"\n🖥️ **{desc}**\n```bash\n{cmd}\n```",
+                                    }
+                                )
+                            elif func_name == "stop_bash":
+                                # Stopping a running command
+                                stream_callback(
+                                    {
+                                        "type": "tool_complete",
+                                        "content": f"\n⏹️ **Stopped command**",
+                                    }
+                                )
+                            elif func_name == "view" or func_name == "read_file":
+                                path = func_args.get(
+                                    "path", func_args.get("file_path", "")
+                                )
+                                start = func_args.get("start_line", "")
+                                end = func_args.get("end_line", "")
+                                line_info = f" (lines {start}-{end})" if start else ""
+                                stream_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "content": f"📄 **Read**: `{path}`{line_info}",
+                                    }
+                                )
+                            elif (
+                                func_name == "write_file"
+                                or func_name == "edit_file"
+                                or func_name == "edit"
+                            ):
+                                path = func_args.get(
+                                    "path", func_args.get("file_path", "")
+                                )
+                                stream_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "content": f"✏️ **Write**: `{path}`",
+                                    }
+                                )
+                            elif func_name == "report_intent":
+                                intent = func_args.get("intent", "")
+                                stream_callback(
+                                    {
+                                        "type": "thinking",
+                                        "content": f"\n💭 **Intent**: {intent}",
+                                    }
+                                )
+                            elif func_name == "glob" or func_name == "find_files":
+                                pattern = func_args.get(
+                                    "pattern", func_args.get("glob", "")
+                                )
+                                stream_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "content": f"🔍 **Find files**: `{pattern}`",
+                                    }
+                                )
+                            elif func_name == "grep" or func_name == "search":
+                                pattern = func_args.get(
+                                    "pattern", func_args.get("query", "")
+                                )
+                                path = func_args.get(
+                                    "path", func_args.get("directory", ".")
+                                )
+                                stream_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "content": f"🔎 **Search**: `{pattern}` in `{path}`",
+                                    }
+                                )
+                            elif func_name == "ls" or func_name == "list":
+                                path = func_args.get(
+                                    "path", func_args.get("directory", ".")
+                                )
+                                stream_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "content": f"📁 **List**: `{path}`",
+                                    }
+                                )
+                            elif "github-mcp-server" in func_name:
+                                # GitHub MCP tools - format nicely
+                                tool_short = (
+                                    func_name.replace("github-mcp-server-", "")
+                                    .replace("_", " ")
+                                    .title()
+                                )
+                                # Extract key info based on tool type
+                                if "clone" in func_name.lower():
+                                    repo = func_args.get(
+                                        "repository", func_args.get("repo", "")
+                                    )
+                                    stream_callback(
+                                        {
+                                            "type": "tool_start",
+                                            "content": f"\n🔄 **Clone Repository**: `{repo}`",
+                                        }
+                                    )
+                                elif "create_pull_request" in func_name.lower():
+                                    title = func_args.get("title", "")
+                                    stream_callback(
+                                        {
+                                            "type": "tool_start",
+                                            "content": f"📝 **Create Pull Request**: {title}",
+                                        }
+                                    )
+                                elif "commit" in func_name.lower():
+                                    msg = func_args.get("message", "")[:100]
+                                    stream_callback(
+                                        {
+                                            "type": "tool_start",
+                                            "content": f"💾 **Commit**: {msg}",
+                                        }
+                                    )
+                                elif "push" in func_name.lower():
+                                    branch = func_args.get("branch", "")
+                                    stream_callback(
+                                        {
+                                            "type": "tool_start",
+                                            "content": f"⬆️ **Push**: `{branch}`",
+                                        }
+                                    )
+                                else:
+                                    stream_callback(
+                                        {
+                                            "type": "tool_start",
+                                            "content": f"\n🔧 **{tool_short}**",
+                                        }
+                                    )
+                            elif func_name == "wait_for_user":
+                                # Waiting for user input
+                                stream_callback(
+                                    {
+                                        "type": "thinking",
+                                        "content": f"\n⏳ **Waiting for input**",
+                                    }
+                                )
+                            elif (
+                                func_name == "task_complete" or func_name == "complete"
+                            ):
+                                # Task completed
+                                stream_callback(
+                                    {
+                                        "type": "tool_complete",
+                                        "content": f"\n✅ **Task completed**",
+                                    }
+                                )
+                            else:
+                                # Generic tool - show name with gear icon and brief args
+                                args_brief = json.dumps(func_args)[:100]
+                                if len(args_brief) >= 100:
+                                    args_brief = args_brief[:97] + "..."
+                                # Format tool name nicely
+                                nice_name = func_name.replace("_", " ").title()
+                                stream_callback(
+                                    {
+                                        "type": "tool_start",
+                                        "content": f"\n⚙️ **{nice_name}**\n{args_brief}",
+                                    }
+                                )
+                    except json.JSONDecodeError:
+                        pass  # Skip malformed JSON
+
+            except Exception as e:
+                logging.debug(f"Error parsing log file {log_file}: {e}")
+
     # Validate token format - Copilot CLI does NOT support classic PATs
     if github_token and github_token.startswith("ghp_"):
         error_msg = (
@@ -306,7 +525,7 @@ def execute_github_copilot(
             stream_callback(
                 {
                     "type": "info",
-                    "content": f"Starting GitHub Copilot with model {model}...",
+                    "content": f"🚀 **Starting GitHub Copilot** with model `{model}`\n",
                 }
             )
 
@@ -318,8 +537,13 @@ def execute_github_copilot(
         # Session file for capturing session ID
         session_file = "/workspace/.copilot_session.md"
 
+        # Log directory for capturing tool calls
+        log_dir = "/workspace/.copilot_logs"
+
         # Build command that reads from the prompt file and exports session
-        cmd = f'copilot -p "$(cat /workspace/.copilot_prompt.txt)" --model {model} --allow-all --no-auto-update --share {session_file}'
+        # Use --stream on to enable streaming output for better real-time feedback
+        # Use --log-level debug to capture tool calls in log files
+        cmd = f'mkdir -p {log_dir} && copilot -p "$(cat /workspace/.copilot_prompt.txt)" --model {model} --allow-all --no-auto-update --stream on --log-level debug --log-dir {log_dir} --share {session_file}'
         if session_id:
             cmd += f" --resume {session_id}"
 
@@ -329,10 +553,14 @@ def execute_github_copilot(
         if not os.path.exists(copilot_config_dir):
             os.makedirs(copilot_config_dir)
 
-        # Run the CLI in the container
+        # Use stdbuf to disable output buffering for real-time streaming
+        # This ensures copilot output is flushed immediately
+        unbuffered_cmd = f"stdbuf -oL -eL {cmd}"
+
+        # Run the CLI in the container with pseudo-TTY for streaming
         container = client.containers.run(
             IMAGE_NAME,
-            ["bash", "-c", cmd],
+            ["bash", "-c", unbuffered_cmd],
             volumes={
                 os.path.abspath(docker_volume_path): {
                     "bind": "/workspace",
@@ -349,26 +577,285 @@ def execute_github_copilot(
                 "GITHUB_TOKEN": github_token,
                 "GH_TOKEN": github_token,
                 "COPILOT_GITHUB_TOKEN": github_token,
+                # Force unbuffered Python output if copilot uses Python
+                "PYTHONUNBUFFERED": "1",
             },
             stderr=True,
             stdout=True,
             detach=True,
+            tty=True,  # Enable TTY for streaming output
         )
 
-        # Collect output
+        # Collect output and buffer for line-based streaming
         all_output = []
+        line_buffer = ""
+        last_emit_time = 0
+        import time
+
+        def emit_buffered_content(content: str, force: bool = False):
+            """Emit buffered content as appropriate event types."""
+            nonlocal last_emit_time
+            if not stream_callback or not content.strip():
+                return
+
+            current_time = time.time()
+            # Rate limit to avoid spamming - emit at most every 0.1 seconds unless forced
+            if not force and (current_time - last_emit_time) < 0.1:
+                return
+
+            stripped = content.strip()
+            if not stripped:
+                return
+
+            last_emit_time = current_time
+
+            # Skip stats and metadata lines
+            if any(
+                stripped.startswith(s)
+                for s in ["Total ", "Usage by", "Session exported"]
+            ):
+                return
+
+            lower_content = stripped.lower()
+
+            # Patterns that should have a line break BEFORE them (major transitions)
+            linebreak_before_patterns = [
+                "cloning",
+                "clone ",
+                "intent:",
+                "i'll clone",
+                "let me clone",
+                "i'll start by",
+                "first, i'll",
+                "i will ",
+                "let me ",
+                "now i'll",
+                "next, i'll",
+                "analyzing",
+                "examining",
+            ]
+
+            # Check if we need a line break before this content
+            needs_linebreak = any(
+                pattern in lower_content for pattern in linebreak_before_patterns
+            )
+            prefix = "\n" if needs_linebreak else ""
+
+            # Detect tool execution patterns - starting an operation
+            tool_start_patterns = [
+                "reading file",
+                "reading `",
+                "writing file",
+                "writing to",
+                "creating file",
+                "creating `",
+                "modifying",
+                "deleting",
+                "searching",
+                "running command",
+                "executing",
+                "checking",
+                "analyzing",
+                "scanning",
+                "cloning",
+                "fetching",
+                "pulling",
+                "pushing",
+                "committing",
+                "staging",
+                "looking at",
+                "examining",
+                "inspecting",
+                "opening",
+                "loading",
+                "parsing",
+                "processing",
+                "building",
+                "compiling",
+                "installing",
+                "downloading",
+                "git clone",
+                "git pull",
+                "git push",
+                "git checkout",
+                "npm install",
+                "pip install",
+                "cargo build",
+            ]
+
+            # Detect tool completion patterns - these get a newline before them
+            tool_complete_patterns = [
+                "created `",
+                "wrote to",
+                "modified `",
+                "deleted",
+                "found",
+                "completed",
+                "successfully",
+                "done",
+                "finished",
+                "updated `",
+                "cloned",
+                "fetched",
+                "pulled",
+                "pushed",
+                "committed",
+                "installed",
+                "downloaded",
+                "built",
+                "compiled",
+                "here's",
+                "here is",
+                "i've ",
+                "i have ",
+            ]
+
+            # Detect intent/thinking patterns
+            intent_patterns = [
+                "let me ",
+                "i'll ",
+                "i will ",
+                "now i",
+                "first,",
+                "next,",
+                "intent:",
+                "plan:",
+                "approach:",
+            ]
+
+            if any(pattern in lower_content for pattern in tool_start_patterns):
+                stream_callback(
+                    {"type": "tool_start", "content": f"{prefix}{stripped}"}
+                )
+            elif any(pattern in lower_content for pattern in tool_complete_patterns):
+                # Tool completions get a newline before them for visual separation
+                stream_callback({"type": "tool_complete", "content": f"\n{stripped}"})
+            elif stripped.lower().startswith("error") or "error:" in lower_content:
+                stream_callback({"type": "error", "content": stripped})
+            elif any(pattern in lower_content for pattern in intent_patterns):
+                stream_callback(
+                    {"type": "thinking", "content": f"{prefix}💭 {stripped}"}
+                )
+            else:
+                # Stream as thinking for all other meaningful content
+                stream_callback({"type": "thinking", "content": stripped})
 
         try:
-            # Stream the container logs in real-time
-            for log_chunk in container.logs(stream=True, follow=True):
-                log_line = log_chunk.decode("utf-8")
-                all_output.append(log_line)
+            # Use attach with a socket for true real-time streaming
+            # The logs() API buffers when TTY is enabled
+            socket = container.attach_socket(
+                params={"stdout": True, "stderr": True, "stream": True}
+            )
+            socket._sock.setblocking(False)
 
-                if stream_callback:
-                    stream_callback({"type": "output", "content": log_line})
+            import select
+            import time as time_module
+
+            start_time = time_module.time()
+            timeout = 3600  # 1 hour max
+
+            # Track log file positions for incremental reading
+            log_positions = {}
+            copilot_log_dir = os.path.join(working_directory, ".copilot_logs")
+            last_log_check = 0
+
+            while True:
+                # Check if container is still running
+                container.reload()
+                if container.status != "running":
+                    # Get any remaining output
+                    try:
+                        while True:
+                            ready, _, _ = select.select([socket._sock], [], [], 0.1)
+                            if ready:
+                                data = socket._sock.recv(4096)
+                                if data:
+                                    chunk_str = data.decode("utf-8", errors="replace")
+                                    all_output.append(chunk_str)
+                                    line_buffer += chunk_str
+                                    while "\n" in line_buffer or "\r" in line_buffer:
+                                        if "\n" in line_buffer:
+                                            line, line_buffer = line_buffer.split(
+                                                "\n", 1
+                                            )
+                                        else:
+                                            line, line_buffer = line_buffer.split(
+                                                "\r", 1
+                                            )
+                                        emit_buffered_content(line, force=True)
+                                else:
+                                    break
+                            else:
+                                break
+                    except:
+                        pass
+                    # Final log parse
+                    parse_tool_calls_from_logs(
+                        copilot_log_dir, log_positions, stream_callback
+                    )
+                    break
+
+                # Check for timeout
+                if time_module.time() - start_time > timeout:
+                    logging.warning("Container execution timed out")
+                    break
+
+                # Parse log files for tool calls every 0.5 seconds
+                current_time = time_module.time()
+                if current_time - last_log_check >= 0.5:
+                    parse_tool_calls_from_logs(
+                        copilot_log_dir, log_positions, stream_callback
+                    )
+                    last_log_check = current_time
+
+                # Try to read from socket with timeout
+                try:
+                    ready, _, _ = select.select([socket._sock], [], [], 0.5)
+                    if ready:
+                        data = socket._sock.recv(4096)
+                        if data:
+                            chunk_str = data.decode("utf-8", errors="replace")
+                            all_output.append(chunk_str)
+                            line_buffer += chunk_str
+
+                            # Process complete lines
+                            while "\n" in line_buffer or "\r" in line_buffer:
+                                if "\n" in line_buffer:
+                                    line, line_buffer = line_buffer.split("\n", 1)
+                                else:
+                                    line, line_buffer = line_buffer.split("\r", 1)
+                                emit_buffered_content(line, force=True)
+
+                            # Emit partial content for long buffers
+                            if len(line_buffer) > 200:
+                                emit_buffered_content(line_buffer)
+                except BlockingIOError:
+                    pass
+                except Exception as e:
+                    logging.debug(f"Socket read error: {e}")
+
+            socket.close()
 
         except Exception as e:
             logging.warning(f"Error streaming logs: {str(e)}")
+            # Fallback to logs() if socket approach fails
+            try:
+                for log_chunk in container.logs(stream=True, follow=True):
+                    chunk_str = log_chunk.decode("utf-8", errors="replace")
+                    all_output.append(chunk_str)
+                    line_buffer += chunk_str
+                    while "\n" in line_buffer or "\r" in line_buffer:
+                        if "\n" in line_buffer:
+                            line, line_buffer = line_buffer.split("\n", 1)
+                        else:
+                            line, line_buffer = line_buffer.split("\r", 1)
+                        emit_buffered_content(line, force=True)
+            except Exception as e2:
+                logging.warning(f"Fallback streaming also failed: {e2}")
+
+        # Emit any remaining buffered content
+        if line_buffer.strip():
+            emit_buffered_content(line_buffer, force=True)
 
         # Wait for container to finish
         try:
@@ -383,6 +870,16 @@ def execute_github_copilot(
         # Clean up the prompt file
         if os.path.exists(prompt_file):
             os.remove(prompt_file)
+
+        # Clean up the log directory
+        copilot_log_dir_host = os.path.join(working_directory, ".copilot_logs")
+        if os.path.exists(copilot_log_dir_host):
+            import shutil
+
+            try:
+                shutil.rmtree(copilot_log_dir_host)
+            except Exception as e:
+                logging.debug(f"Failed to clean up log dir: {e}")
 
         # Parse session ID from the session markdown file
         session_md_path = os.path.join(working_directory, ".copilot_session.md")
