@@ -353,7 +353,7 @@ def extract_imports(code: str) -> set:
     return imports
 
 
-def execute_python_code(code: str, working_directory: str = None) -> str:
+def execute_python_code(code: str, working_directory: str = None, github_token: str = None) -> str:
     if working_directory is None:
         working_directory = os.path.join(os.getcwd(), "WORKSPACE")
 
@@ -418,6 +418,18 @@ python /workspace/temp.py
             f.write(wrapper_script)
         os.chmod(wrapper_file, 0o755)
 
+        # Build environment variables
+        env = {
+            "HOME": "/root",
+            "PYTHONUNBUFFERED": "1",
+        }
+        if github_token:
+            env.update({
+                "GITHUB_TOKEN": github_token,
+                "GH_TOKEN": github_token,
+                "COPILOT_GITHUB_TOKEN": github_token,
+            })
+
         # Run the wrapper script in the container
         container = client.containers.run(
             IMAGE_NAME,
@@ -429,6 +441,7 @@ python /workspace/temp.py
                 }
             },
             working_dir="/workspace",
+            environment=env,
             stderr=True,
             stdout=True,
             detach=True,
@@ -854,9 +867,35 @@ def execute_github_copilot(
         if not os.path.exists(copilot_config_dir):
             os.makedirs(copilot_config_dir)
 
+        # Git/GitHub authentication setup script
+        # This ensures git and gh CLI are properly authenticated with the GitHub token
+        # Runs before every command to ensure auth is current (handles token updates)
+        git_auth_setup = '''
+# Configure git credentials if GITHUB_TOKEN is available
+if [ -n "$GITHUB_TOKEN" ]; then
+    # Configure git to use the token for HTTPS authentication
+    git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
+    
+    # Set git user info if not already set
+    if [ -z "$(git config --global user.email 2>/dev/null)" ]; then
+        git config --global user.email "copilot@github.com"
+    fi
+    if [ -z "$(git config --global user.name 2>/dev/null)" ]; then
+        git config --global user.name "GitHub Copilot"
+    fi
+    
+    # Authenticate gh CLI with the token (silently)
+    echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
+    
+    # Mark /workspace as safe directory for git
+    git config --global --add safe.directory /workspace 2>/dev/null || true
+fi
+'''
+
         # Use stdbuf to disable output buffering for real-time streaming
         # This ensures copilot output is flushed immediately
-        unbuffered_cmd = f"stdbuf -oL -eL {cmd}"
+        # Prepend git auth setup to ensure git/gh are authenticated
+        unbuffered_cmd = f"{git_auth_setup}\nstdbuf -oL -eL {cmd}"
 
         if use_persistent_container:
             # Use the container manager for persistent per-conversation containers
