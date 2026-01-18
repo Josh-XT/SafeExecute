@@ -90,9 +90,14 @@ class ConversationContainerManager:
         working_directory: str,
         docker_volume_path: str,
         github_token: str = None,
+        git_token: str = None,
     ) -> tuple:
         """
         Get existing container or create a new one for the conversation.
+
+        Args:
+            github_token: Token for Copilot CLI authentication
+            git_token: Optional separate token for git/gh operations (for org repos)
 
         Returns:
             tuple: (container, is_new) - the container and whether it was newly created
@@ -131,7 +136,11 @@ class ConversationContainerManager:
         # Create new container
         return (
             self._create_container(
-                conversation_id, working_directory, docker_volume_path, github_token
+                conversation_id,
+                working_directory,
+                docker_volume_path,
+                github_token,
+                git_token,
             ),
             True,
         )
@@ -142,8 +151,16 @@ class ConversationContainerManager:
         working_directory: str,
         docker_volume_path: str,
         github_token: str = None,
+        git_token: str = None,
     ):
-        """Create a new persistent container for a conversation."""
+        """Create a new persistent container for a conversation.
+
+        Args:
+            github_token: Token for Copilot CLI authentication
+            git_token: Optional separate token for git/gh operations (for org repos)
+        """
+        # Use separate git token if provided, otherwise fall back to copilot token
+        effective_git_token = git_token if git_token else github_token
         client = docker.from_env()
 
         # Ensure image exists
@@ -164,14 +181,13 @@ class ConversationContainerManager:
             "PYTHONUNBUFFERED": "1",
             "CONVERSATION_ID": conversation_id,
         }
+        # COPILOT_GITHUB_TOKEN is for Copilot CLI auth (needs Copilot permissions)
+        # GITHUB_TOKEN and GH_TOKEN are for git/gh operations (may need org access)
         if github_token:
-            env.update(
-                {
-                    "GITHUB_TOKEN": github_token,
-                    "GH_TOKEN": github_token,
-                    "COPILOT_GITHUB_TOKEN": github_token,
-                }
-            )
+            env["COPILOT_GITHUB_TOKEN"] = github_token
+        if effective_git_token:
+            env["GITHUB_TOKEN"] = effective_git_token
+            env["GH_TOKEN"] = effective_git_token
 
         # Container name for easy identification
         container_name = f"safeexecute-{conversation_id[:12]}"
@@ -353,7 +369,9 @@ def extract_imports(code: str) -> set:
     return imports
 
 
-def execute_python_code(code: str, working_directory: str = None, github_token: str = None) -> str:
+def execute_python_code(
+    code: str, working_directory: str = None, github_token: str = None
+) -> str:
     if working_directory is None:
         working_directory = os.path.join(os.getcwd(), "WORKSPACE")
 
@@ -424,11 +442,13 @@ python /workspace/temp.py
             "PYTHONUNBUFFERED": "1",
         }
         if github_token:
-            env.update({
-                "GITHUB_TOKEN": github_token,
-                "GH_TOKEN": github_token,
-                "COPILOT_GITHUB_TOKEN": github_token,
-            })
+            env.update(
+                {
+                    "GITHUB_TOKEN": github_token,
+                    "GH_TOKEN": github_token,
+                    "COPILOT_GITHUB_TOKEN": github_token,
+                }
+            )
 
         # Run the wrapper script in the container
         container = client.containers.run(
@@ -509,6 +529,7 @@ def execute_github_copilot(
     session_id: str = None,
     stream_callback: callable = None,
     conversation_id: str = None,
+    git_token: str = None,
 ) -> dict:
     """
     Execute a prompt using GitHub Copilot CLI within a Docker container.
@@ -535,6 +556,10 @@ def execute_github_copilot(
                          the container persists across multiple executions in the same
                          conversation, preserving installed dependencies and state.
                          Containers have a 60-minute TTL when inactive.
+        git_token: Optional separate token for git/gh CLI operations. Use this if you need
+                   to access organization repositories that the Copilot token doesn't have
+                   access to. Can be a classic PAT (ghp_...) or org-scoped fine-grained PAT.
+                   If not provided, github_token will be used for git operations.
 
     Returns:
         dict: A dictionary containing:
@@ -542,6 +567,8 @@ def execute_github_copilot(
             - 'session_id': The session ID (can be used to resume this session)
             - 'success': Boolean indicating if the operation was successful
     """
+    # Use separate git token if provided, otherwise fall back to copilot token
+    effective_git_token = git_token if git_token else github_token
     import json
     import re
     import threading
@@ -870,11 +897,20 @@ def execute_github_copilot(
         # Git/GitHub authentication setup script
         # This ensures git and gh CLI are properly authenticated with the GitHub token
         # Runs before every command to ensure auth is current (handles token updates)
-        git_auth_setup = '''
+        git_auth_setup = """
 # Configure git credentials if GITHUB_TOKEN is available
 if [ -n "$GITHUB_TOKEN" ]; then
-    # Configure git to use the token for HTTPS authentication
-    git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
+    # Configure git credential store and add the token
+    git config --global credential.helper store
+    
+    # Write credentials to the git credential store file
+    # This allows git to authenticate with GitHub using the token
+    echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
+    chmod 600 ~/.git-credentials
+    
+    # Also set up .netrc for tools that use it (like some git operations)
+    echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > ~/.netrc
+    chmod 600 ~/.netrc
     
     # Set git user info if not already set
     if [ -z "$(git config --global user.email 2>/dev/null)" ]; then
@@ -890,7 +926,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
     # Mark /workspace as safe directory for git
     git config --global --add safe.directory /workspace 2>/dev/null || true
 fi
-'''
+"""
 
         # Use stdbuf to disable output buffering for real-time streaming
         # This ensures copilot output is flushed immediately
@@ -905,9 +941,11 @@ fi
                 working_directory=working_directory,
                 docker_volume_path=docker_volume_path,
                 github_token=github_token,
+                git_token=effective_git_token,
             )
 
-            # Update environment with current GitHub token (in case it changed)
+            # Update environment with current tokens (in case they changed)
+            # COPILOT_GITHUB_TOKEN for Copilot CLI, GITHUB_TOKEN/GH_TOKEN for git operations
             # Execute command in the persistent container
             # exec_run with stream=True returns (exit_code, output_generator)
             exec_instance = persistent_container.client.api.exec_create(
@@ -915,8 +953,8 @@ fi
                 ["bash", "-c", unbuffered_cmd],
                 workdir="/workspace",
                 environment={
-                    "GITHUB_TOKEN": github_token,
-                    "GH_TOKEN": github_token,
+                    "GITHUB_TOKEN": effective_git_token,
+                    "GH_TOKEN": effective_git_token,
                     "COPILOT_GITHUB_TOKEN": github_token,
                 },
                 tty=True,
@@ -1110,8 +1148,8 @@ fi
                 working_dir="/workspace",
                 environment={
                     "HOME": "/root",
-                    "GITHUB_TOKEN": github_token,
-                    "GH_TOKEN": github_token,
+                    "GITHUB_TOKEN": effective_git_token,
+                    "GH_TOKEN": effective_git_token,
                     "COPILOT_GITHUB_TOKEN": github_token,
                     "PYTHONUNBUFFERED": "1",
                 },
