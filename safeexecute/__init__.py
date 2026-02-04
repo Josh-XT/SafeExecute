@@ -369,6 +369,81 @@ def extract_imports(code: str) -> set:
     return imports
 
 
+def translate_paths_for_container(code: str, working_directory: str) -> str:
+    """
+    Translate absolute file paths in the code to container-relative paths.
+
+    The agent may generate code with absolute paths from its context like:
+    - /agixt/WORKSPACE/agent_id/conversation_id/data.csv
+    - /home/user/WORKSPACE/agent_id/conv_id/file.csv
+
+    Inside the SafeExecute container, the working_directory is mounted at /workspace,
+    so these paths need to be translated to /workspace/filename.csv or just filename.csv.
+
+    Args:
+        code: The Python code to translate paths in
+        working_directory: The absolute path to the working directory on the host
+
+    Returns:
+        The code with translated paths
+    """
+    if not working_directory:
+        return code
+
+    # Normalize the working directory path
+    normalized_wd = os.path.normpath(working_directory)
+
+    # Common patterns that indicate the agent used absolute paths from context
+    # We need to replace paths like:
+    # '/agixt/WORKSPACE/agent_id/conv_id/file.csv' -> 'file.csv' or '/workspace/file.csv'
+
+    # Pattern 1: Replace the exact working_directory path with /workspace
+    # Handle both with and without trailing slash
+    if normalized_wd in code:
+        code = code.replace(normalized_wd + "/", "/workspace/")
+        code = code.replace(normalized_wd, "/workspace")
+
+    # Also try with the original path format
+    if working_directory != normalized_wd and working_directory in code:
+        code = code.replace(working_directory + "/", "/workspace/")
+        code = code.replace(working_directory, "/workspace")
+
+    # Pattern 2: Handle paths that include WORKSPACE marker in various formats
+    # e.g., /agixt/WORKSPACE/abc123/xyz789/file.csv
+    workspace_patterns = [
+        r'(["\'])(/[^"\']*?/WORKSPACE/[^"\']+?)(["\'])',  # Quoted absolute paths with WORKSPACE
+        r'(["\'])(\./WORKSPACE/[^"\']+?)(["\'])',  # Relative paths starting with ./WORKSPACE
+    ]
+
+    for pattern in workspace_patterns:
+        matches = re.findall(pattern, code)
+        for match in matches:
+            quote, full_path, end_quote = match
+            # Extract just the filename from the path
+            # The working_directory is the path up to and including the conversation folder
+            # So we want to extract the relative path from working_directory
+
+            # Try to find if the path starts with our working directory
+            if normalized_wd in full_path:
+                relative_part = full_path[len(normalized_wd) :].lstrip("/")
+                new_path = (
+                    f"/workspace/{relative_part}" if relative_part else "/workspace"
+                )
+                code = code.replace(
+                    f"{quote}{full_path}{end_quote}", f"{quote}{new_path}{end_quote}"
+                )
+            elif working_directory in full_path:
+                relative_part = full_path[len(working_directory) :].lstrip("/")
+                new_path = (
+                    f"/workspace/{relative_part}" if relative_part else "/workspace"
+                )
+                code = code.replace(
+                    f"{quote}{full_path}{end_quote}", f"{quote}{new_path}{end_quote}"
+                )
+
+    return code
+
+
 def execute_python_code(
     code: str, working_directory: str = None, github_token: str = None
 ) -> str:
@@ -398,6 +473,10 @@ def execute_python_code(
     # Strip out python code blocks if they exist in the code
     if "```python" in code:
         code = code.split("```python")[1].split("```")[0]
+
+    # Translate absolute paths in the code to container-relative paths
+    # This handles cases where the agent uses paths from its context that won't exist inside the container
+    code = translate_paths_for_container(code, working_directory)
 
     # Extract imports from the code to auto-install missing packages
     imports = extract_imports(code)
@@ -644,7 +723,7 @@ def execute_github_copilot(
                                 stream_callback(
                                     {
                                         "type": "tool_start",
-                                        "content": f"📄 **Read**: `{path}`{line_info}",
+                                        "content": f"\n📄 **Read**: `{path}`{line_info}",
                                     }
                                 )
                             elif (
@@ -658,7 +737,7 @@ def execute_github_copilot(
                                 stream_callback(
                                     {
                                         "type": "tool_start",
-                                        "content": f"✏️ **Write**: `{path}`",
+                                        "content": f"\n✏️ **Write**: `{path}`",
                                     }
                                 )
                             elif func_name == "report_intent":
@@ -676,7 +755,7 @@ def execute_github_copilot(
                                 stream_callback(
                                     {
                                         "type": "tool_start",
-                                        "content": f"🔍 **Find files**: `{pattern}`",
+                                        "content": f"\n🔍 **Find files**: `{pattern}`",
                                     }
                                 )
                             elif func_name == "grep" or func_name == "search":
@@ -689,7 +768,7 @@ def execute_github_copilot(
                                 stream_callback(
                                     {
                                         "type": "tool_start",
-                                        "content": f"🔎 **Search**: `{pattern}` in `{path}`",
+                                        "content": f"\n🔎 **Search**: `{pattern}` in `{path}`",
                                     }
                                 )
                             elif func_name == "ls" or func_name == "list":
@@ -699,7 +778,7 @@ def execute_github_copilot(
                                 stream_callback(
                                     {
                                         "type": "tool_start",
-                                        "content": f"📁 **List**: `{path}`",
+                                        "content": f"\n📁 **List**: `{path}`",
                                     }
                                 )
                             elif "github-mcp-server" in func_name:
@@ -725,7 +804,7 @@ def execute_github_copilot(
                                     stream_callback(
                                         {
                                             "type": "tool_start",
-                                            "content": f"📝 **Create Pull Request**: {title}",
+                                            "content": f"\n📝 **Create Pull Request**: {title}",
                                         }
                                     )
                                 elif "commit" in func_name.lower():
@@ -733,7 +812,7 @@ def execute_github_copilot(
                                     stream_callback(
                                         {
                                             "type": "tool_start",
-                                            "content": f"💾 **Commit**: {msg}",
+                                            "content": f"\n💾 **Commit**: {msg}",
                                         }
                                     )
                                 elif "push" in func_name.lower():
@@ -741,7 +820,7 @@ def execute_github_copilot(
                                     stream_callback(
                                         {
                                             "type": "tool_start",
-                                            "content": f"⬆️ **Push**: `{branch}`",
+                                            "content": f"\n⬆️ **Push**: `{branch}`",
                                         }
                                     )
                                 else:
@@ -801,7 +880,7 @@ def execute_github_copilot(
             "5. Generate and use the new token (starts with 'github_pat_')"
         )
         if stream_callback:
-            stream_callback({"type": "error", "content": error_msg})
+            stream_callback({"type": "error", "content": f"\n{error_msg}"})
         return {
             "response": f"Error: {error_msg}",
             "session_id": None,
@@ -866,7 +945,7 @@ def execute_github_copilot(
             stream_callback(
                 {
                     "type": "info",
-                    "content": f"🚀 **Starting GitHub Copilot** with model `{model}`{container_info_msg}\n",
+                    "content": f"\n🚀 **Starting GitHub Copilot** with model `{model}`{container_info_msg}\n",
                 }
             )
 
@@ -1076,11 +1155,9 @@ fi
                 elif any(
                     pattern in lower_content for pattern in tool_complete_patterns
                 ):
-                    stream_callback(
-                        {"type": "tool_complete", "content": f"\n{stripped}"}
-                    )
+                    stream_callback({"type": "tool_complete", "content": f"{stripped}"})
                 elif stripped.lower().startswith("error") or "error:" in lower_content:
-                    stream_callback({"type": "error", "content": stripped})
+                    stream_callback({"type": "error", "content": f"{stripped}"})
                 elif any(pattern in lower_content for pattern in intent_patterns):
                     stream_callback(
                         {"type": "thinking", "content": f"{prefix}💭 {stripped}"}
