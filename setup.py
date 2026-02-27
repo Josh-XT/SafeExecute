@@ -7,7 +7,7 @@ with open(os.path.join(this_directory, "README.md"), encoding="utf-8") as f:
 
 setup(
     name="safeexecute",
-    version="0.0.24",
+    version="0.0.25",
     description="Safe way to execute Python code with containerization.",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -15,5 +15,5 @@ setup(
     author_email="josh@devxt.com",
     packages=find_packages(),
     python_requires=">=3.10",
-    install_requires=["docker"],
+    install_requires=["docker>=7.1.0"],
 )
