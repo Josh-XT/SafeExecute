@@ -12,6 +12,24 @@ from typing import Optional, Dict, Any, Callable
 IMAGE_NAME = "joshxt/safeexecute:latest"
 CONTAINER_TTL_SECONDS = 3600  # 60 minutes TTL for inactive containers
 
+# Regex to strip ANSI escape sequences and control characters from TTY output
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;]*[a-zA-Z]"
+    r"|\x1b\].*?\x07"
+    r"|\x1b[()][AB012]"
+    r"|\x1b\[[0-9]*[JKH]"
+    r"|\r"
+)
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes and non-printable control characters."""
+    if not text:
+        return text
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    return text
+
 
 class ConversationContainerManager:
     """
@@ -547,7 +565,7 @@ python /workspace/temp.py
         )
         result = container.wait()
         exit_code = result.get("StatusCode", 0)
-        logs = container.logs().decode("utf-8")
+        logs = _strip_ansi(container.logs().decode("utf-8"))
         container.remove()
 
         # Clean up temp files
@@ -1172,7 +1190,7 @@ fi
 
             for chunk in output_generator:
                 if chunk:
-                    chunk_str = chunk.decode("utf-8", errors="replace")
+                    chunk_str = _strip_ansi(chunk.decode("utf-8", errors="replace"))
                     all_output.append(chunk_str)
                     line_buffer += chunk_str
 
@@ -1426,7 +1444,7 @@ fi
                         if ready:
                             data = socket._sock.recv(4096)
                             if data:
-                                chunk_str = data.decode("utf-8", errors="replace")
+                                chunk_str = _strip_ansi(data.decode("utf-8", errors="replace"))
                                 all_output.append(chunk_str)
                                 line_buffer += chunk_str
                                 while "\n" in line_buffer or "\r" in line_buffer:
@@ -1448,7 +1466,7 @@ fi
                 logging.warning(f"Error streaming logs: {str(e)}")
                 try:
                     for log_chunk in container.logs(stream=True, follow=True):
-                        chunk_str = log_chunk.decode("utf-8", errors="replace")
+                        chunk_str = _strip_ansi(log_chunk.decode("utf-8", errors="replace"))
                         all_output.append(chunk_str)
                         line_buffer += chunk_str
                         while "\n" in line_buffer or "\r" in line_buffer:
