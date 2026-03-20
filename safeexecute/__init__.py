@@ -1444,7 +1444,9 @@ fi
                         if ready:
                             data = socket._sock.recv(4096)
                             if data:
-                                chunk_str = _strip_ansi(data.decode("utf-8", errors="replace"))
+                                chunk_str = _strip_ansi(
+                                    data.decode("utf-8", errors="replace")
+                                )
                                 all_output.append(chunk_str)
                                 line_buffer += chunk_str
                                 while "\n" in line_buffer or "\r" in line_buffer:
@@ -1466,7 +1468,9 @@ fi
                 logging.warning(f"Error streaming logs: {str(e)}")
                 try:
                     for log_chunk in container.logs(stream=True, follow=True):
-                        chunk_str = _strip_ansi(log_chunk.decode("utf-8", errors="replace"))
+                        chunk_str = _strip_ansi(
+                            log_chunk.decode("utf-8", errors="replace")
+                        )
                         all_output.append(chunk_str)
                         line_buffer += chunk_str
                         while "\n" in line_buffer or "\r" in line_buffer:
