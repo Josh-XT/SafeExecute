@@ -1,4 +1,4 @@
-FROM python:3.10-bullseye
+FROM python:3.11-bullseye
 WORKDIR /app
 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
