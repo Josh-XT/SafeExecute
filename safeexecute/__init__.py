@@ -11,6 +11,32 @@ from typing import Optional, Dict, Any, Callable
 
 IMAGE_NAME = "joshxt/safeexecute:latest"
 CONTAINER_TTL_SECONDS = 3600  # 60 minutes TTL for inactive containers
+NETWORK_NAME = "safeexecute-restricted"
+
+# iptables rules to block access to private/local network ranges while allowing
+# the Docker gateway (host) and public internet. The gateway IP is discovered at
+# runtime so containers can still reach AGiXT on the host.
+_IPTABLES_BLOCK_PRIVATE = """
+GATEWAY=$(ip route | awk '/default/ {print $3}')
+iptables -A OUTPUT -d $GATEWAY -j ACCEPT
+iptables -A OUTPUT -d 10.0.0.0/8 -j DROP
+iptables -A OUTPUT -d 172.16.0.0/12 -j DROP
+iptables -A OUTPUT -d 192.168.0.0/16 -j DROP
+iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
+""".strip()
+
+
+def _ensure_network(client):
+    """Ensure the restricted Docker network exists, create it if not."""
+    try:
+        return client.networks.get(NETWORK_NAME)
+    except docker.errors.NotFound:
+        logging.info(f"Creating Docker network '{NETWORK_NAME}' for SafeExecute")
+        return client.networks.create(
+            NETWORK_NAME,
+            driver="bridge",
+            internal=False,  # Allow internet access
+        )
 
 # Regex to strip ANSI escape sequences and control characters from TTY output
 _ANSI_ESCAPE_RE = re.compile(
@@ -219,10 +245,15 @@ class ConversationContainerManager:
 
         # Create a long-running container that stays alive
         # We'll exec commands into it rather than running one-shot containers
+        # Apply iptables rules at startup to block private network access
+        init_cmd = f"{_IPTABLES_BLOCK_PRIVATE}\nwhile true; do sleep 30; done"
+        network = _ensure_network(client)
         container = client.containers.run(
             IMAGE_NAME,
-            ["bash", "-c", "while true; do sleep 30; done"],  # Keep alive
+            ["bash", "-c", init_cmd],
             name=container_name,
+            cap_add=["NET_ADMIN"],
+            network=network.name,
             volumes={
                 os.path.abspath(docker_volume_path): {
                     "bind": "/workspace",
@@ -523,8 +554,10 @@ def execute_python_code(
             )
 
         # Create a wrapper script that installs deps then runs the code
+        # Include iptables rules to block private network access
         install_script = "\n".join(install_commands)
         wrapper_script = f"""#!/bin/bash
+{_IPTABLES_BLOCK_PRIVATE}
 {install_script}
 python /workspace/temp.py
 """
@@ -547,7 +580,8 @@ python /workspace/temp.py
                 }
             )
 
-        # Run the wrapper script in the container
+        # Run the wrapper script in the container with restricted network
+        network = _ensure_network(client)
         container = client.containers.run(
             IMAGE_NAME,
             f"bash /workspace/run_wrapper.sh",
@@ -559,6 +593,8 @@ python /workspace/temp.py
             },
             working_dir="/workspace",
             environment=env,
+            cap_add=["NET_ADMIN"],
+            network=network.name,
             stderr=True,
             stdout=True,
             detach=True,
@@ -1227,9 +1263,11 @@ fi
 
         else:
             # Original one-shot container behavior for backward compatibility
+            # Prepend iptables rules to block private network access
+            network = _ensure_network(client)
             container = client.containers.run(
                 IMAGE_NAME,
-                ["bash", "-c", unbuffered_cmd],
+                ["bash", "-c", f"{_IPTABLES_BLOCK_PRIVATE}\n{unbuffered_cmd}"],
                 volumes={
                     os.path.abspath(docker_volume_path): {
                         "bind": "/workspace",
@@ -1248,6 +1286,8 @@ fi
                     "COPILOT_GITHUB_TOKEN": github_token,
                     "PYTHONUNBUFFERED": "1",
                 },
+                cap_add=["NET_ADMIN"],
+                network=network.name,
                 stderr=True,
                 stdout=True,
                 detach=True,
