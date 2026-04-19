@@ -38,6 +38,7 @@ def _ensure_network(client):
             internal=False,  # Allow internet access
         )
 
+
 # Regex to strip ANSI escape sequences and control characters from TTY output
 _ANSI_ESCAPE_RE = re.compile(
     r"\x1b\[[0-9;]*[a-zA-Z]"
