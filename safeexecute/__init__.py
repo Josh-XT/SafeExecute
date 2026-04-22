@@ -1034,18 +1034,24 @@ def execute_github_copilot(
         git_auth_setup = """
 # Configure git credentials if GITHUB_TOKEN is available
 if [ -n "$GITHUB_TOKEN" ]; then
-    # Configure git credential store and add the token
+    # PRIMARY: rewrite all https://github.com/ URLs to embed the token directly.
+    # This is the most reliable approach inside ephemeral containers because it
+    # does NOT rely on credential helpers (which can fail silently if gh's keyring
+    # is unavailable or if a previously-installed helper shadows the store helper).
+    # Works for `git clone`, `git fetch`, `git push`, and submodules transparently.
+    git config --global --unset-all url.https://x-access-token@github.com/.insteadOf 2>/dev/null || true
+    git config --global --unset-all "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf" 2>/dev/null || true
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+    # SECONDARY: also set up the credential store and .netrc as fallbacks for
+    # tools that build URLs without going through git's url-rewrite machinery.
     git config --global credential.helper store
-    
-    # Write credentials to the git credential store file
-    # This allows git to authenticate with GitHub using the token
     echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
     chmod 600 ~/.git-credentials
-    
-    # Also set up .netrc for tools that use it (like some git operations)
     echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > ~/.netrc
     chmod 600 ~/.netrc
-    
+
     # Set git user info if not already set
     if [ -z "$(git config --global user.email 2>/dev/null)" ]; then
         git config --global user.email "copilot@github.com"
@@ -1053,14 +1059,16 @@ if [ -n "$GITHUB_TOKEN" ]; then
     if [ -z "$(git config --global user.name 2>/dev/null)" ]; then
         git config --global user.name "GitHub Copilot"
     fi
-    
-    # Authenticate gh CLI with the token (silently)
-    echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
 
-    # Wire git to use gh's credential helper so `git` uses the same creds as `gh`.
-    # This is the official supported way to keep git and gh in sync, and it means
-    # git will work for any host gh is logged into (github.com plus any GHES hosts).
-    gh auth setup-git 2>/dev/null || true
+    # Authenticate gh CLI with the token. `gh auth login --with-token` refuses
+    # to run when GH_TOKEN/GITHUB_TOKEN env vars are set (it just uses them
+    # directly), so unset them for this one command, then restore.
+    _saved_gh_token="$GH_TOKEN"
+    _saved_gh_token2="$GITHUB_TOKEN"
+    unset GH_TOKEN GITHUB_TOKEN
+    echo "$_saved_gh_token2" | gh auth login --with-token --hostname github.com 2>/dev/null || true
+    export GH_TOKEN="$_saved_gh_token"
+    export GITHUB_TOKEN="$_saved_gh_token2"
 
     # Mark /workspace as safe directory for git
     git config --global --add safe.directory /workspace 2>/dev/null || true
