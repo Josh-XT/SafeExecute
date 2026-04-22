@@ -26,6 +26,37 @@ iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
 """.strip()
 
 
+# Git/GitHub auth setup, sourced into every container shell that may run
+# `git`, `gh`, or `copilot`. Uses url.insteadOf rewrites as the primary auth
+# mechanism so it works without relying on credential helpers (which can fail
+# silently in ephemeral containers without a keyring).
+_GIT_AUTH_SETUP = r"""
+if [ -n "$GITHUB_TOKEN" ]; then
+    # PRIMARY: rewrite https://github.com/ and git@github.com: to embed the token.
+    # No credential helper required; works for clone/fetch/push/submodules.
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/" >/dev/null 2>&1 || true
+    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:" >/dev/null 2>&1 || true
+
+    # SECONDARY: credential store + .netrc as fallbacks for tools that build
+    # URLs without going through git's url-rewrite machinery.
+    git config --global credential.helper store >/dev/null 2>&1 || true
+    echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
+    chmod 600 ~/.git-credentials
+    echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > ~/.netrc
+    chmod 600 ~/.netrc
+
+    # Default identity if not set
+    git config --global user.email "copilot@github.com" >/dev/null 2>&1 || true
+    git config --global user.name "GitHub Copilot" >/dev/null 2>&1 || true
+
+    # gh auth login refuses to run when GH_TOKEN/GITHUB_TOKEN are set; with
+    # those env vars present, gh uses them directly so no explicit login needed.
+    # Mark /workspace as a safe directory for git
+    git config --global --add safe.directory /workspace >/dev/null 2>&1 || true
+fi
+""".strip()
+
+
 def _ensure_network(client):
     """Ensure the restricted Docker network exists, create it if not."""
     try:
@@ -559,6 +590,7 @@ def execute_python_code(
         install_script = "\n".join(install_commands)
         wrapper_script = f"""#!/bin/bash
 {_IPTABLES_BLOCK_PRIVATE}
+{_GIT_AUTH_SETUP}
 {install_script}
 python /workspace/temp.py
 """
@@ -1028,52 +1060,10 @@ def execute_github_copilot(
         if not os.path.exists(copilot_config_dir):
             os.makedirs(copilot_config_dir)
 
-        # Git/GitHub authentication setup script
-        # This ensures git and gh CLI are properly authenticated with the GitHub token
-        # Runs before every command to ensure auth is current (handles token updates)
-        git_auth_setup = """
-# Configure git credentials if GITHUB_TOKEN is available
-if [ -n "$GITHUB_TOKEN" ]; then
-    # PRIMARY: rewrite all https://github.com/ URLs to embed the token directly.
-    # This is the most reliable approach inside ephemeral containers because it
-    # does NOT rely on credential helpers (which can fail silently if gh's keyring
-    # is unavailable or if a previously-installed helper shadows the store helper).
-    # Works for `git clone`, `git fetch`, `git push`, and submodules transparently.
-    git config --global --unset-all url.https://x-access-token@github.com/.insteadOf 2>/dev/null || true
-    git config --global --unset-all "url.https://x-access-token:${GITHUB_TOKEN}@github.com/.insteadOf" 2>/dev/null || true
-    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-    git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
-
-    # SECONDARY: also set up the credential store and .netrc as fallbacks for
-    # tools that build URLs without going through git's url-rewrite machinery.
-    git config --global credential.helper store
-    echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
-    chmod 600 ~/.git-credentials
-    echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > ~/.netrc
-    chmod 600 ~/.netrc
-
-    # Set git user info if not already set
-    if [ -z "$(git config --global user.email 2>/dev/null)" ]; then
-        git config --global user.email "copilot@github.com"
-    fi
-    if [ -z "$(git config --global user.name 2>/dev/null)" ]; then
-        git config --global user.name "GitHub Copilot"
-    fi
-
-    # Authenticate gh CLI with the token. `gh auth login --with-token` refuses
-    # to run when GH_TOKEN/GITHUB_TOKEN env vars are set (it just uses them
-    # directly), so unset them for this one command, then restore.
-    _saved_gh_token="$GH_TOKEN"
-    _saved_gh_token2="$GITHUB_TOKEN"
-    unset GH_TOKEN GITHUB_TOKEN
-    echo "$_saved_gh_token2" | gh auth login --with-token --hostname github.com 2>/dev/null || true
-    export GH_TOKEN="$_saved_gh_token"
-    export GITHUB_TOKEN="$_saved_gh_token2"
-
-    # Mark /workspace as safe directory for git
-    git config --global --add safe.directory /workspace 2>/dev/null || true
-fi
-"""
+        # Git/GitHub authentication setup script (shared with the python
+        # execution path). Uses url.insteadOf rewrites for reliable auth in
+        # ephemeral containers without depending on a credential helper.
+        git_auth_setup = _GIT_AUTH_SETUP
 
         # Use stdbuf to disable output buffering for real-time streaming
         # This ensures copilot output is flushed immediately
