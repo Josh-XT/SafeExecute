@@ -1056,7 +1056,12 @@ if [ -n "$GITHUB_TOKEN" ]; then
     
     # Authenticate gh CLI with the token (silently)
     echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
-    
+
+    # Wire git to use gh's credential helper so `git` uses the same creds as `gh`.
+    # This is the official supported way to keep git and gh in sync, and it means
+    # git will work for any host gh is logged into (github.com plus any GHES hosts).
+    gh auth setup-git 2>/dev/null || true
+
     # Mark /workspace as safe directory for git
     git config --global --add safe.directory /workspace 2>/dev/null || true
 fi
