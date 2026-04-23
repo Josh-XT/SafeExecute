@@ -47,7 +47,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
 
     # Default identity if not set
     git config --global user.email "copilot@github.com" >/dev/null 2>&1 || true
-    git config --global user.name "GitHub Copilot" >/dev/null 2>&1 || true
+    git config --global user.name "AGiXT" >/dev/null 2>&1 || true
 
     # gh auth login refuses to run when GH_TOKEN/GITHUB_TOKEN are set; with
     # those env vars present, gh uses them directly so no explicit login needed.
