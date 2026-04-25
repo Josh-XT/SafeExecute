@@ -7,6 +7,7 @@ import docker
 import asyncio
 import time
 import threading
+import uuid
 from typing import Optional, Dict, Any, Callable
 
 IMAGE_NAME = "joshxt/safeexecute:latest"
@@ -87,6 +88,118 @@ def _strip_ansi(text: str) -> str:
     text = _ANSI_ESCAPE_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
     return text
+
+
+def _resolve_docker_volume_path(working_directory: str) -> str:
+    """Translate an in-container AGiXT workspace path to the host bind path."""
+    docker_volume_path = working_directory
+    if os.path.exists("/.dockerenv"):
+        host_workspace = os.environ.get("WORKING_DIRECTORY")
+        if host_workspace:
+            workspace_marker = "/WORKSPACE"
+            if workspace_marker in working_directory:
+                relative_part = working_directory.split(workspace_marker, 1)[1]
+                docker_volume_path = host_workspace.rstrip("/") + relative_part
+            else:
+                docker_volume_path = host_workspace
+    return docker_volume_path
+
+
+def _get_host_workspace_owner(working_directory: str) -> tuple[int, int]:
+    """Return the uid/gid that should own files created in the mounted workspace."""
+    try:
+        env_uid = os.environ.get("SAFEEXECUTE_HOST_UID")
+        env_gid = os.environ.get("SAFEEXECUTE_HOST_GID")
+        if env_uid is not None and env_gid is not None:
+            return int(env_uid), int(env_gid)
+    except (TypeError, ValueError):
+        logging.debug("Invalid SAFEEXECUTE_HOST_UID/GID values; falling back")
+
+    try:
+        process_uid = os.getuid()
+        process_gid = os.getgid()
+        if process_uid != 0:
+            return process_uid, process_gid
+    except AttributeError:
+        return 0, 0
+
+    try:
+        stat_info = os.stat(working_directory)
+        return stat_info.st_uid, stat_info.st_gid
+    except OSError:
+        return 0, 0
+
+
+def _workspace_permission_repair_script(uid: int, gid: int) -> str:
+    """Build a root-run shell snippet that returns workspace files to host ownership."""
+    try:
+        uid = int(uid)
+        gid = int(gid)
+    except (TypeError, ValueError):
+        return ""
+
+    if uid < 0 or gid < 0 or uid == 0:
+        return ""
+
+    return f"""
+find /workspace -xdev \\( -uid 0 -o -gid 0 \\) -exec chown -h {uid}:{gid} {{}} + 2>/dev/null || true
+find /workspace -xdev -type d -uid {uid} -exec chmod u+rwx {{}} + 2>/dev/null || true
+find /workspace -xdev -type f -uid {uid} -exec chmod u+rw {{}} + 2>/dev/null || true
+""".strip()
+
+
+def _workspace_owner_env(working_directory: str) -> Dict[str, str]:
+    uid, gid = _get_host_workspace_owner(working_directory)
+    return {
+        "SAFEEXECUTE_HOST_UID": str(uid),
+        "SAFEEXECUTE_HOST_GID": str(gid),
+    }
+
+
+def repair_workspace_permissions(working_directory: str = None) -> bool:
+    """Best-effort repair for bind-mounted workspace files created by root containers."""
+    if working_directory is None:
+        working_directory = os.path.join(os.getcwd(), "WORKSPACE")
+
+    try:
+        if not os.path.exists(working_directory):
+            os.makedirs(working_directory, exist_ok=True)
+
+        uid, gid = _get_host_workspace_owner(working_directory)
+        repair_script = _workspace_permission_repair_script(uid, gid)
+        if not repair_script:
+            return True
+
+        client = install_docker_image()
+        docker_volume_path = _resolve_docker_volume_path(working_directory)
+        container = client.containers.run(
+            IMAGE_NAME,
+            ["bash", "-c", repair_script],
+            volumes={
+                os.path.abspath(docker_volume_path): {
+                    "bind": "/workspace",
+                    "mode": "rw",
+                }
+            },
+            working_dir="/workspace",
+            stderr=True,
+            stdout=True,
+            detach=True,
+        )
+        result = container.wait()
+        exit_code = result.get("StatusCode", 0)
+        logs = _strip_ansi(container.logs().decode("utf-8", errors="replace"))
+        container.remove(force=True)
+
+        if exit_code != 0:
+            logging.warning(
+                f"Workspace permission repair exited with {exit_code}: {logs}"
+            )
+            return False
+        return True
+    except Exception as e:
+        logging.error(f"Error repairing workspace permissions: {e}")
+        return False
 
 
 class ConversationContainerManager:
@@ -531,21 +644,16 @@ def execute_python_code(
     if working_directory is None:
         working_directory = os.path.join(os.getcwd(), "WORKSPACE")
 
-    # When in Docker, translate container path to host path for volume mounting
-    docker_volume_path = working_directory
-    if os.path.exists("/.dockerenv"):
-        host_workspace = os.environ.get("WORKING_DIRECTORY")
-        if host_workspace:
-            # Extract relative path after /WORKSPACE and append to host path
-            workspace_marker = "/WORKSPACE"
-            if workspace_marker in working_directory:
-                relative_part = working_directory.split(workspace_marker, 1)[1]
-                docker_volume_path = host_workspace.rstrip("/") + relative_part
-            else:
-                docker_volume_path = host_workspace
+    docker_volume_path = _resolve_docker_volume_path(working_directory)
 
     if not os.path.exists(working_directory):
         os.makedirs(working_directory)
+
+    owner_env = _workspace_owner_env(working_directory)
+    permission_repair_script = _workspace_permission_repair_script(
+        int(owner_env["SAFEEXECUTE_HOST_UID"]),
+        int(owner_env["SAFEEXECUTE_HOST_GID"]),
+    )
 
     # Check if there are any explicit pip install commands in the code
     explicit_packages = re.findall(r"pip install\s+([\w\-\[\]>=<,.\s]+)", code)
@@ -588,12 +696,19 @@ def execute_python_code(
         # Create a wrapper script that installs deps then runs the code
         # Include iptables rules to block private network access
         install_script = "\n".join(install_commands)
-        wrapper_script = f"""#!/bin/bash
-{_IPTABLES_BLOCK_PRIVATE}
-{_GIT_AUTH_SETUP}
-{install_script}
-python /workspace/temp.py
-"""
+        wrapper_script = "\n".join(
+            [
+                "#!/bin/bash",
+                _IPTABLES_BLOCK_PRIVATE,
+                _GIT_AUTH_SETUP,
+                install_script,
+                "python /workspace/temp.py",
+                "exit_code=$?",
+                permission_repair_script,
+                "exit $exit_code",
+                "",
+            ]
+        )
         wrapper_file = os.path.join(working_directory, "run_wrapper.sh")
         with open(wrapper_file, "w") as f:
             f.write(wrapper_script)
@@ -603,6 +718,7 @@ python /workspace/temp.py
         env = {
             "HOME": "/root",
             "PYTHONUNBUFFERED": "1",
+            **owner_env,
         }
         if github_token:
             env.update(
@@ -685,6 +801,115 @@ python /workspace/temp.py
     except Exception as e:
         logging.error(f"Error executing Python code: {str(e)}")
         return f"Error: {str(e)}\n\n---\n**Execution Failed**: Please fix the issue and try again."
+
+
+def execute_shell_command(
+    command: str,
+    working_directory: str = None,
+    agent_id: str = None,
+    conversation_id: str = None,
+    github_token: str = None,
+    timeout: int = 3600,
+) -> str:
+    """Execute a shell command in the workspace and repair bind-mount ownership."""
+    if working_directory is None:
+        working_directory = os.path.join(os.getcwd(), "WORKSPACE")
+
+    docker_volume_path = _resolve_docker_volume_path(working_directory)
+
+    if not os.path.exists(working_directory):
+        os.makedirs(working_directory, exist_ok=True)
+
+    owner_env = _workspace_owner_env(working_directory)
+    permission_repair_script = _workspace_permission_repair_script(
+        int(owner_env["SAFEEXECUTE_HOST_UID"]),
+        int(owner_env["SAFEEXECUTE_HOST_GID"]),
+    )
+    command_id = uuid.uuid4().hex
+    command_filename = f".safeexecute_command_{command_id}.sh"
+    wrapper_filename = f".safeexecute_wrapper_{command_id}.sh"
+    command_file = os.path.join(working_directory, command_filename)
+    wrapper_file = os.path.join(working_directory, wrapper_filename)
+
+    try:
+        with open(command_file, "w", encoding="utf-8") as f:
+            f.write(command)
+            if not command.endswith("\n"):
+                f.write("\n")
+        os.chmod(command_file, 0o755)
+
+        wrapper_script = f"""#!/bin/bash
+{_IPTABLES_BLOCK_PRIVATE}
+{_GIT_AUTH_SETUP}
+bash /workspace/{command_filename}
+exit_code=$?
+{permission_repair_script}
+exit $exit_code
+"""
+        with open(wrapper_file, "w", encoding="utf-8") as f:
+            f.write(wrapper_script)
+        os.chmod(wrapper_file, 0o755)
+
+        client = install_docker_image()
+        env = {
+            "HOME": "/root",
+            "PYTHONUNBUFFERED": "1",
+            "CONVERSATION_ID": conversation_id or "",
+            "AGENT_ID": agent_id or "",
+            **owner_env,
+        }
+        if github_token:
+            env.update(
+                {
+                    "GITHUB_TOKEN": github_token,
+                    "GH_TOKEN": github_token,
+                    "COPILOT_GITHUB_TOKEN": github_token,
+                }
+            )
+
+        network = _ensure_network(client)
+        container = client.containers.run(
+            IMAGE_NAME,
+            f"bash /workspace/{wrapper_filename}",
+            volumes={
+                os.path.abspath(docker_volume_path): {
+                    "bind": "/workspace",
+                    "mode": "rw",
+                }
+            },
+            working_dir="/workspace",
+            environment=env,
+            cap_add=["NET_ADMIN"],
+            network=network.name,
+            stderr=True,
+            stdout=True,
+            detach=True,
+        )
+        try:
+            result = container.wait(timeout=timeout)
+            exit_code = result.get("StatusCode", 0)
+        except Exception as wait_error:
+            container.remove(force=True)
+            return f"Error executing shell command: timed out or failed while waiting: {wait_error}"
+
+        logs = _strip_ansi(container.logs().decode("utf-8", errors="replace"))
+        container.remove(force=True)
+
+        if exit_code != 0:
+            return f"{logs}\n\nExit Code: {exit_code}".strip()
+        return logs
+    except Exception as e:
+        logging.error(f"Error executing shell command: {str(e)}")
+        return f"Error executing shell command: {str(e)}"
+    finally:
+        for temp_path in [command_file, wrapper_file]:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception as cleanup_error:
+                logging.debug(
+                    f"Failed to remove SafeExecute temp file: {cleanup_error}"
+                )
 
 
 def execute_github_copilot(
@@ -977,20 +1202,16 @@ def execute_github_copilot(
     if working_directory is None:
         working_directory = os.path.join(os.getcwd(), "WORKSPACE")
 
-    # Handle Docker-in-Docker path translation
-    docker_volume_path = working_directory
-    if os.path.exists("/.dockerenv"):
-        host_workspace = os.environ.get("WORKING_DIRECTORY")
-        if host_workspace:
-            workspace_marker = "/WORKSPACE"
-            if workspace_marker in working_directory:
-                relative_part = working_directory.split(workspace_marker, 1)[1]
-                docker_volume_path = host_workspace.rstrip("/") + relative_part
-            else:
-                docker_volume_path = host_workspace
+    docker_volume_path = _resolve_docker_volume_path(working_directory)
 
     if not os.path.exists(working_directory):
         os.makedirs(working_directory)
+
+    owner_env = _workspace_owner_env(working_directory)
+    permission_repair_script = _workspace_permission_repair_script(
+        int(owner_env["SAFEEXECUTE_HOST_UID"]),
+        int(owner_env["SAFEEXECUTE_HOST_GID"]),
+    )
 
     # Track whether we're using a persistent container
     use_persistent_container = conversation_id is not None
@@ -1069,6 +1290,14 @@ def execute_github_copilot(
         # This ensures copilot output is flushed immediately
         # Prepend git auth setup to ensure git/gh are authenticated
         unbuffered_cmd = f"{git_auth_setup}\nstdbuf -oL -eL {cmd}"
+        wrapped_copilot_cmd = "\n".join(
+            [
+                unbuffered_cmd,
+                "exit_code=$?",
+                permission_repair_script,
+                "exit $exit_code",
+            ]
+        )
 
         if use_persistent_container:
             # Use the container manager for persistent per-conversation containers
@@ -1087,12 +1316,13 @@ def execute_github_copilot(
             # exec_run with stream=True returns (exit_code, output_generator)
             exec_instance = persistent_container.client.api.exec_create(
                 persistent_container.id,
-                ["bash", "-c", unbuffered_cmd],
+                ["bash", "-c", wrapped_copilot_cmd],
                 workdir="/workspace",
                 environment={
                     "GITHUB_TOKEN": effective_git_token,
                     "GH_TOKEN": effective_git_token,
                     "COPILOT_GITHUB_TOKEN": github_token,
+                    **owner_env,
                 },
                 tty=True,
             )
@@ -1271,7 +1501,7 @@ def execute_github_copilot(
             network = _ensure_network(client)
             container = client.containers.run(
                 IMAGE_NAME,
-                ["bash", "-c", f"{_IPTABLES_BLOCK_PRIVATE}\n{unbuffered_cmd}"],
+                ["bash", "-c", f"{_IPTABLES_BLOCK_PRIVATE}\n{wrapped_copilot_cmd}"],
                 volumes={
                     os.path.abspath(docker_volume_path): {
                         "bind": "/workspace",
@@ -1289,6 +1519,7 @@ def execute_github_copilot(
                     "GH_TOKEN": effective_git_token,
                     "COPILOT_GITHUB_TOKEN": github_token,
                     "PYTHONUNBUFFERED": "1",
+                    **owner_env,
                 },
                 cap_add=["NET_ADMIN"],
                 network=network.name,
