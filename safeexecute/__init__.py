@@ -912,6 +912,601 @@ exit $exit_code
                 )
 
 
+def _normalize_codex_auth_json(codex_auth_json: str = "") -> tuple[Optional[str], str]:
+    """Return validated Codex auth JSON, accepting raw JSON or base64 JSON."""
+    if not codex_auth_json:
+        return None, ""
+
+    auth_text = str(codex_auth_json).strip()
+    if auth_text.lower() in ("none", "null", "false", "0"):
+        return None, ""
+
+    candidates = [auth_text]
+    if not auth_text.startswith("{"):
+        try:
+            import base64
+
+            decoded = base64.b64decode(auth_text, validate=True).decode("utf-8")
+            candidates.append(decoded.strip())
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            return json.dumps(parsed, indent=2), ""
+        except Exception:
+            continue
+
+    return None, (
+        "OPENAI_CODEX_AUTH_JSON_SECRET must be a valid Codex auth.json value "
+        "or a base64-encoded auth.json value."
+    )
+
+
+def _write_codex_config(
+    codex_config_dir: str,
+    auth_json: str = None,
+    model: str = "gpt-5.5",
+    reasoning_effort: str = "medium",
+) -> tuple[bool, str]:
+    os.makedirs(codex_config_dir, exist_ok=True)
+
+    auth_path = os.path.join(codex_config_dir, "auth.json")
+    if auth_json:
+        with open(auth_path, "w", encoding="utf-8") as f:
+            f.write(auth_json)
+            if not auth_json.endswith("\n"):
+                f.write("\n")
+        os.chmod(auth_path, 0o600)
+    elif not os.path.exists(auth_path):
+        return False, (
+            "OpenAI Codex ChatGPT login is required. Run `codex login` with "
+            "ChatGPT, then configure OPENAI_CODEX_AUTH_JSON_SECRET with the "
+            "contents of ~/.codex/auth.json or a base64-encoded copy of it."
+        )
+
+    effort = str(reasoning_effort or "medium").strip().lower()
+    if effort not in {"low", "medium", "high", "xhigh"}:
+        effort = "medium"
+    model_name = str(model or "gpt-5.5").strip() or "gpt-5.5"
+
+    config_path = os.path.join(codex_config_dir, "config.toml")
+    config_toml = "\n".join(
+        [
+            f"model = {json.dumps(model_name)}",
+            f"model_reasoning_effort = {json.dumps(effort)}",
+            "",
+            '[projects."/workspace"]',
+            'trust_level = "trusted"',
+            "",
+        ]
+    )
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(config_toml)
+    os.chmod(config_path, 0o600)
+    return True, ""
+
+
+def _latest_codex_session_id(codex_config_dir: str, fallback: str = None) -> str:
+    state_db = os.path.join(codex_config_dir, "state_5.sqlite")
+    if os.path.exists(state_db):
+        try:
+            import sqlite3
+
+            with sqlite3.connect(state_db) as conn:
+                row = conn.execute(
+                    """
+                    SELECT id
+                    FROM threads
+                    WHERE archived = 0
+                    ORDER BY updated_at_ms DESC, updated_at DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if row and row[0]:
+                    return row[0]
+        except Exception as e:
+            logging.debug(f"Failed to parse Codex state database: {e}")
+
+    session_index = os.path.join(codex_config_dir, "session_index.jsonl")
+    latest_id = fallback
+    if not os.path.exists(session_index):
+        return latest_id
+
+    try:
+        with open(session_index, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    if entry.get("id"):
+                        latest_id = entry["id"]
+                except Exception:
+                    continue
+    except Exception as e:
+        logging.debug(f"Failed to parse Codex session index: {e}")
+    return latest_id
+
+
+def _emit_codex_stream_event(
+    content: str,
+    stream_callback: callable = None,
+    force: bool = False,
+    last_emit_time: list = None,
+):
+    if not stream_callback or not content.strip():
+        return
+
+    if last_emit_time is not None:
+        current_time = time.time()
+        if not force and (current_time - last_emit_time[0]) < 0.1:
+            return
+        last_emit_time[0] = current_time
+
+    stripped = content.strip()
+    if not stripped:
+        return
+
+    lower_content = stripped.lower()
+    tool_start_patterns = [
+        "running command",
+        "reading",
+        "writing",
+        "creating",
+        "modifying",
+        "deleting",
+        "searching",
+        "checking",
+        "analyzing",
+        "scanning",
+        "cloning",
+        "fetching",
+        "pulling",
+        "pushing",
+        "committing",
+        "applying patch",
+    ]
+    tool_complete_patterns = [
+        "created",
+        "wrote",
+        "modified",
+        "deleted",
+        "found",
+        "completed",
+        "successfully",
+        "finished",
+        "updated",
+        "cloned",
+        "fetched",
+        "pulled",
+        "pushed",
+        "committed",
+    ]
+    thinking_patterns = [
+        "i'll",
+        "i will",
+        "let me",
+        "first,",
+        "next,",
+        "plan:",
+        "approach:",
+    ]
+
+    if any(pattern in lower_content for pattern in tool_start_patterns):
+        event_type = "tool_start"
+    elif any(pattern in lower_content for pattern in tool_complete_patterns):
+        event_type = "tool_complete"
+    elif stripped.lower().startswith("error") or "error:" in lower_content:
+        event_type = "error"
+    elif any(pattern in lower_content for pattern in thinking_patterns):
+        event_type = "thinking"
+    else:
+        event_type = "output"
+
+    stream_callback({"type": event_type, "content": stripped})
+
+
+def execute_openai_codex(
+    prompt: str,
+    codex_auth_json: str = "",
+    working_directory: str = None,
+    model: str = "gpt-5.5",
+    reasoning_effort: str = "medium",
+    session_id: str = None,
+    stream_callback: callable = None,
+    conversation_id: str = None,
+    git_token: str = None,
+) -> dict:
+    """
+    Execute a prompt using OpenAI Codex CLI within a Docker container.
+
+    Codex uses ChatGPT login credentials from Codex's auth.json file. Pass the
+    auth JSON through codex_auth_json, or leave it empty after a previous run has
+    already persisted /workspace/.codex_config/auth.json.
+
+    Args:
+        prompt: The prompt/request to send to Codex
+        codex_auth_json: Raw or base64-encoded ~/.codex/auth.json from `codex login`
+        working_directory: The directory to mount as the workspace (default: WORKSPACE)
+        model: The Codex model to use (default: gpt-5.5)
+        reasoning_effort: Codex reasoning effort (default: medium)
+        session_id: Optional Codex session ID to resume
+        stream_callback: Optional callback function that receives streaming events
+        conversation_id: Optional conversation ID for persistent containers
+        git_token: Optional GitHub token for git/gh operations inside the workspace
+
+    Returns:
+        dict with response, session_id, and success keys.
+    """
+    import select
+    import shlex
+    import time as time_module
+
+    if working_directory is None:
+        working_directory = os.path.join(os.getcwd(), "WORKSPACE")
+
+    docker_volume_path = _resolve_docker_volume_path(working_directory)
+    if not os.path.exists(working_directory):
+        os.makedirs(working_directory, exist_ok=True)
+
+    owner_env = _workspace_owner_env(working_directory)
+    permission_repair_script = _workspace_permission_repair_script(
+        int(owner_env["SAFEEXECUTE_HOST_UID"]),
+        int(owner_env["SAFEEXECUTE_HOST_GID"]),
+    )
+
+    codex_config_dir = os.path.join(working_directory, ".codex_config")
+    auth_json, auth_error = _normalize_codex_auth_json(codex_auth_json)
+    wrote_auth_json = bool(auth_json)
+    codex_auth_path = os.path.join(codex_config_dir, "auth.json")
+    if auth_error:
+        if stream_callback:
+            stream_callback({"type": "error", "content": auth_error})
+        return {
+            "response": f"Error: {auth_error}",
+            "session_id": session_id,
+            "success": False,
+        }
+
+    config_ok, config_error = _write_codex_config(
+        codex_config_dir=codex_config_dir,
+        auth_json=auth_json,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    if not config_ok:
+        if stream_callback:
+            stream_callback({"type": "error", "content": config_error})
+        return {
+            "response": f"Error: {config_error}",
+            "session_id": session_id,
+            "success": False,
+        }
+
+    prompt_file = os.path.join(working_directory, ".codex_prompt.txt")
+    last_message_file = os.path.join(working_directory, ".codex_last_message.txt")
+    for temp_path in [last_message_file]:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+    effective_session_id = None
+    if session_id and str(session_id).strip().lower() not in ("none", "null", ""):
+        effective_session_id = str(session_id).strip()
+
+    effort = str(reasoning_effort or "medium").strip().lower()
+    if effort not in {"low", "medium", "high", "xhigh"}:
+        effort = "medium"
+    model_name = str(model or "gpt-5.5").strip() or "gpt-5.5"
+
+    try:
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write(prompt or "")
+
+        client = install_docker_image()
+
+        if stream_callback:
+            container_info_msg = ""
+            if conversation_id:
+                manager = get_container_manager()
+                container_info = manager.get_container_info(conversation_id)
+                if container_info:
+                    ttl_mins = int(container_info["ttl_remaining"] / 60)
+                    container_info_msg = (
+                        f" (persistent container, {ttl_mins}m TTL remaining)"
+                    )
+                else:
+                    container_info_msg = " (creating new persistent container)"
+            stream_callback(
+                {
+                    "type": "info",
+                    "content": (
+                        f"\nStarting OpenAI Codex with model `{model_name}` "
+                        f"and reasoning effort `{effort}`{container_info_msg}\n"
+                    ),
+                }
+            )
+
+        reasoning_config = f"model_reasoning_effort={json.dumps(effort)}"
+        if effective_session_id:
+            cmd_parts = [
+                "codex",
+                "exec",
+                "resume",
+                "--model",
+                model_name,
+                "-c",
+                reasoning_config,
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "--output-last-message",
+                "/workspace/.codex_last_message.txt",
+                effective_session_id,
+                "-",
+            ]
+        else:
+            cmd_parts = [
+                "codex",
+                "exec",
+                "--model",
+                model_name,
+                "-c",
+                reasoning_config,
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "--cd",
+                "/workspace",
+                "--output-last-message",
+                "/workspace/.codex_last_message.txt",
+                "-",
+            ]
+        codex_cmd = " ".join(shlex.quote(str(part)) for part in cmd_parts)
+        wrapped_codex_cmd = "\n".join(
+            [
+                _GIT_AUTH_SETUP,
+                f"stdbuf -oL -eL {codex_cmd} < /workspace/.codex_prompt.txt",
+                "exit_code=$?",
+                permission_repair_script,
+                "exit $exit_code",
+            ]
+        )
+
+        env = {
+            "HOME": "/root",
+            "CODEX_HOME": "/workspace/.codex_config",
+            "PYTHONUNBUFFERED": "1",
+            "CONVERSATION_ID": conversation_id or "",
+            **owner_env,
+        }
+        if git_token:
+            env.update({"GITHUB_TOKEN": git_token, "GH_TOKEN": git_token})
+
+        use_persistent_container = conversation_id is not None
+        all_output = []
+        line_buffer = ""
+        last_emit_time = [0]
+        exit_code = 1
+
+        if use_persistent_container:
+            manager = get_container_manager()
+            persistent_container, _ = manager.get_or_create_container(
+                conversation_id=conversation_id,
+                working_directory=working_directory,
+                docker_volume_path=docker_volume_path,
+                github_token=None,
+                git_token=git_token,
+            )
+            exec_instance = persistent_container.client.api.exec_create(
+                persistent_container.id,
+                ["bash", "-c", wrapped_codex_cmd],
+                workdir="/workspace",
+                environment=env,
+                tty=True,
+            )
+            output_generator = persistent_container.client.api.exec_start(
+                exec_instance["Id"],
+                stream=True,
+                tty=True,
+            )
+
+            for chunk in output_generator:
+                if not chunk:
+                    continue
+                chunk_str = _strip_ansi(chunk.decode("utf-8", errors="replace"))
+                all_output.append(chunk_str)
+                line_buffer += chunk_str
+                while "\n" in line_buffer or "\r" in line_buffer:
+                    if "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
+                    else:
+                        line, line_buffer = line_buffer.split("\r", 1)
+                    _emit_codex_stream_event(
+                        line, stream_callback, True, last_emit_time
+                    )
+
+            if line_buffer.strip():
+                _emit_codex_stream_event(
+                    line_buffer, stream_callback, True, last_emit_time
+                )
+            manager.update_activity(conversation_id)
+            exec_inspect = persistent_container.client.api.exec_inspect(
+                exec_instance["Id"]
+            )
+            exit_code = exec_inspect.get("ExitCode", 0)
+        else:
+            network = _ensure_network(client)
+            container = client.containers.run(
+                IMAGE_NAME,
+                ["bash", "-c", f"{_IPTABLES_BLOCK_PRIVATE}\n{wrapped_codex_cmd}"],
+                volumes={
+                    os.path.abspath(docker_volume_path): {
+                        "bind": "/workspace",
+                        "mode": "rw",
+                    }
+                },
+                working_dir="/workspace",
+                environment=env,
+                cap_add=["NET_ADMIN"],
+                network=network.name,
+                stderr=True,
+                stdout=True,
+                detach=True,
+                tty=True,
+            )
+
+            try:
+                socket = container.attach_socket(
+                    params={"stdout": True, "stderr": True, "stream": True}
+                )
+                socket._sock.setblocking(False)
+                start_time = time_module.time()
+                timeout = 3600
+
+                while True:
+                    container.reload()
+                    if container.status != "running":
+                        try:
+                            while True:
+                                ready, _, _ = select.select([socket._sock], [], [], 0.1)
+                                if not ready:
+                                    break
+                                data = socket._sock.recv(4096)
+                                if not data:
+                                    break
+                                chunk_str = _strip_ansi(
+                                    data.decode("utf-8", errors="replace")
+                                )
+                                all_output.append(chunk_str)
+                                line_buffer += chunk_str
+                                while "\n" in line_buffer or "\r" in line_buffer:
+                                    if "\n" in line_buffer:
+                                        line, line_buffer = line_buffer.split("\n", 1)
+                                    else:
+                                        line, line_buffer = line_buffer.split("\r", 1)
+                                    _emit_codex_stream_event(
+                                        line, stream_callback, True, last_emit_time
+                                    )
+                        except Exception:
+                            pass
+                        break
+
+                    if time_module.time() - start_time > timeout:
+                        logging.warning("Codex container execution timed out")
+                        break
+
+                    try:
+                        ready, _, _ = select.select([socket._sock], [], [], 0.5)
+                        if ready:
+                            data = socket._sock.recv(4096)
+                            if data:
+                                chunk_str = _strip_ansi(
+                                    data.decode("utf-8", errors="replace")
+                                )
+                                all_output.append(chunk_str)
+                                line_buffer += chunk_str
+                                while "\n" in line_buffer or "\r" in line_buffer:
+                                    if "\n" in line_buffer:
+                                        line, line_buffer = line_buffer.split("\n", 1)
+                                    else:
+                                        line, line_buffer = line_buffer.split("\r", 1)
+                                    _emit_codex_stream_event(
+                                        line, stream_callback, True, last_emit_time
+                                    )
+                    except BlockingIOError:
+                        pass
+                    except Exception as e:
+                        logging.debug(f"Codex socket read error: {e}")
+                socket.close()
+            except Exception as e:
+                logging.warning(f"Error streaming Codex logs: {e}")
+                for log_chunk in container.logs(stream=True, follow=True):
+                    chunk_str = _strip_ansi(log_chunk.decode("utf-8", errors="replace"))
+                    all_output.append(chunk_str)
+                    line_buffer += chunk_str
+                    while "\n" in line_buffer or "\r" in line_buffer:
+                        if "\n" in line_buffer:
+                            line, line_buffer = line_buffer.split("\n", 1)
+                        else:
+                            line, line_buffer = line_buffer.split("\r", 1)
+                        _emit_codex_stream_event(
+                            line, stream_callback, True, last_emit_time
+                        )
+
+            if line_buffer.strip():
+                _emit_codex_stream_event(
+                    line_buffer, stream_callback, True, last_emit_time
+                )
+
+            try:
+                wait_result = container.wait(timeout=3630)
+                exit_code = wait_result.get("StatusCode", 0)
+            except Exception as e:
+                logging.warning(f"Codex container wait timeout: {e}")
+                exit_code = 1
+            container.remove(force=True)
+
+        response_text = ""
+        if os.path.exists(last_message_file):
+            try:
+                with open(last_message_file, "r", encoding="utf-8") as f:
+                    response_text = f.read().strip()
+            except Exception as e:
+                logging.debug(f"Failed to read Codex last message file: {e}")
+
+        full_output = "".join(all_output).strip()
+        if not response_text:
+            response_text = full_output
+
+        result_session_id = _latest_codex_session_id(
+            codex_config_dir, fallback=effective_session_id
+        )
+
+        if exit_code != 0:
+            logging.warning(f"OpenAI Codex execution had errors: {exit_code}")
+            return {
+                "response": response_text or full_output,
+                "session_id": result_session_id,
+                "success": False,
+            }
+
+        if stream_callback:
+            stream_callback(
+                {"type": "complete", "content": "OpenAI Codex completed successfully"}
+            )
+
+        logging.info("OpenAI Codex executed successfully")
+        return {
+            "response": response_text,
+            "session_id": result_session_id,
+            "success": True,
+        }
+    except Exception as e:
+        logging.error(f"Error executing OpenAI Codex: {e}")
+        return {
+            "response": f"Error running OpenAI Codex: {e}",
+            "session_id": session_id,
+            "success": False,
+        }
+    finally:
+        for temp_path in [prompt_file, last_message_file]:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception as cleanup_error:
+                logging.debug(f"Failed to remove Codex temp file: {cleanup_error}")
+        if wrote_auth_json:
+            try:
+                if os.path.exists(codex_auth_path):
+                    os.remove(codex_auth_path)
+            except Exception as cleanup_error:
+                logging.debug(f"Failed to remove Codex auth file: {cleanup_error}")
+
+
 def execute_github_copilot(
     prompt: str,
     github_token: str,
