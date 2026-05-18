@@ -10,7 +10,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
-RUN pip install --upgrade pip && pip install numpy matplotlib seaborn scikit-learn yfinance scipy statsmodels sympy bokeh plotly dash networkx pyvis pandas agixtsdk openpyxl xlrd xlsxwriter qrcode
+RUN pip install --upgrade pip && pip install numpy matplotlib seaborn scikit-learn yfinance scipy statsmodels sympy bokeh plotly dash networkx pyvis pandas agixtsdk openpyxl xlrd xlsxwriter qrcode cloakbrowser
 
 # Install coding CLIs via npm globally
 RUN npm install -g @github/copilot @openai/codex
