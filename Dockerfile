@@ -97,7 +97,21 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         yfinance
 
 # Install coding CLIs via npm globally
-RUN npm install -g @github/copilot @openai/codex
+RUN npm install -g @github/copilot @openai/codex @anthropic-ai/claude-code
+
+# Install Kiro CLI globally from the official Linux zip package. The zip path
+# avoids AppImage/FUSE requirements inside Docker while matching Kiro's CLI docs.
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) kiro_arch="x86_64" ;; \
+        arm64) kiro_arch="aarch64" ;; \
+        *) echo "Unsupported architecture for Kiro CLI: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL "https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-${kiro_arch}-linux.zip" -o /tmp/kirocli.zip; \
+    unzip -q /tmp/kirocli.zip -d /tmp; \
+    Q_INSTALL_GLOBAL=1 Q_SKIP_SETUP=1 KIRO_CLI_SKIP_SETUP=1 /tmp/kirocli/install.sh; \
+    rm -rf /tmp/kirocli /tmp/kirocli.zip
 
 # Install GitHub Copilot Python SDK
 RUN pip install git+https://github.com/github/copilot-sdk.git#subdirectory=python
