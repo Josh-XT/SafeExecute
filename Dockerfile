@@ -47,6 +47,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zip \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -g 1000 safeexecute && \
+    useradd -m -u 1000 -g safeexecute -s /bin/bash safeexecute
+
 RUN python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install \
         agixtsdk \
