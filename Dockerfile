@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        cmake \
         file \
         gh \
         git \
@@ -29,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
         libmagic1 \
         libsm6 \
+        libssl-dev \
         libusb-1.0-0 \
         libxext6 \
         libxrender1 \
@@ -47,6 +49,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip \
         zip \
     && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | \
+        sh -s -- -y --profile minimal --default-toolchain stable && \
+    rustup component add rustfmt clippy && \
+    chmod -R a+rwX /usr/local/rustup /usr/local/cargo && \
+    for bin in /usr/local/cargo/bin/*; do ln -sf "$bin" "/usr/local/bin/$(basename "$bin")"; done && \
+    rustc --version && \
+    cargo --version
 
 RUN groupadd -g 1000 safeexecute && \
     useradd -m -u 1000 -g safeexecute -s /bin/bash safeexecute && \
