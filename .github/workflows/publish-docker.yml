@@ -19,6 +19,7 @@ jobs:
       registry-repo-name: SafeExecute
       registry-readme: ./README.md
       tags: |
+        type=raw,value=latest,enable={{is_default_branch}}
         type=schedule
         type=ref,event=branch
         type=semver,pattern={{version}}
