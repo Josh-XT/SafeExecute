@@ -32,6 +32,14 @@ iptables -A OUTPUT -d 169.254.0.0/16 -j DROP
 # mechanism so it works without relying on credential helpers (which can fail
 # silently in ephemeral containers without a keyring).
 _GIT_AUTH_SETUP = r"""
+export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
+export GCM_INTERACTIVE="${GCM_INTERACTIVE:-Never}"
+export GH_PROMPT_DISABLED="${GH_PROMPT_DISABLED:-1}"
+export GH_NO_UPDATE_NOTIFIER="${GH_NO_UPDATE_NOTIFIER:-1}"
+export GIT_ASKPASS="${GIT_ASKPASS:-/bin/false}"
+export SSH_ASKPASS="${SSH_ASKPASS:-/bin/false}"
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new}"
+
 if [ -n "$GITHUB_TOKEN" ]; then
     # PRIMARY: rewrite https://github.com/ and git@github.com: to embed the token.
     # No credential helper required; works for clone/fetch/push/submodules.
