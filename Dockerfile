@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         libmagic1 \
+        libnspr4 \
+        libnss3 \
         libsm6 \
         libssl-dev \
         libusb-1.0-0 \
