@@ -4,7 +4,8 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/usr/lib/python3/dist-packages
+    PYTHONPATH=/usr/lib/python3/dist-packages \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -135,6 +136,9 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         xlsxwriter \
         xlrd \
         yfinance
+
+RUN python -m playwright install chromium && \
+    chmod -R a+rwX /ms-playwright
 
 # Install coding CLIs via npm globally
 RUN npm install -g @github/copilot @openai/codex @anthropic-ai/claude-code
