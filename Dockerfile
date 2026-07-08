@@ -18,11 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
+        blender \
         cmake \
+        ffmpeg \
         file \
         gh \
         git \
         gir1.2-gtk-3.0 \
+        imagemagick \
         iproute2 \
         iptables \
         jq \
@@ -57,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxrender1 \
         libzbar0 \
         nodejs \
+        openscad \
         openssh-client \
         pkg-config \
         procps \
@@ -68,6 +72,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sqlite3 \
         tesseract-ocr \
         unzip \
+        xauth \
+        xvfb \
         zip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -100,8 +106,11 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         httpx \
         lxml \
         matplotlib \
+        manifold3d \
+        meshio \
         networkx \
         numpy \
+        numpy-stl \
         opencv-python-headless \
         openpyxl \
         pandas \
@@ -131,8 +140,11 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         scikit-learn \
         scipy \
         seaborn \
+        shapely \
         statsmodels \
+        svgpathtools \
         sympy \
+        trimesh \
         xlsxwriter \
         xlrd \
         yfinance
