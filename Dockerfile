@@ -159,6 +159,11 @@ RUN npm install -g @github/copilot @openai/codex @anthropic-ai/claude-code
 # configured ~/.grok/auth.json contents, so the image only ships the binary.
 RUN set -eux; \
     curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash; \
+    grok_binary="$(readlink -f /usr/local/bin/grok)"; \
+    cp "$grok_binary" /usr/local/bin/grok-build-cli; \
+    chmod 0755 /usr/local/bin/grok-build-cli; \
+    ln -sf /usr/local/bin/grok-build-cli /usr/local/bin/grok; \
+    ln -sf /usr/local/bin/grok-build-cli /usr/local/bin/agent; \
     grok --version
 
 # Install Kiro CLI globally from the official Linux zip package. The zip path
