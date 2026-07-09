@@ -155,6 +155,12 @@ RUN python -m playwright install chromium && \
 # Install coding CLIs via npm globally
 RUN npm install -g @github/copilot @openai/codex @anthropic-ai/claude-code
 
+# Grok Build CLI. Runtime authentication is injected per AGiXT agent from the
+# configured ~/.grok/auth.json contents, so the image only ships the binary.
+RUN set -eux; \
+    curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash; \
+    grok --version
+
 # Install Kiro CLI globally from the official Linux zip package. The zip path
 # avoids AppImage/FUSE requirements inside Docker while matching Kiro's CLI docs.
 RUN set -eux; \
