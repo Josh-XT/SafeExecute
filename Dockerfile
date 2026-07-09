@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         blender \
         cmake \
+        dvisvgm \
         ffmpeg \
         file \
         gh \
@@ -29,12 +30,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2 \
         iptables \
         jq \
+        latexmk \
         less \
         libasound2 \
         libatk-bridge2.0-0 \
         libatk1.0-0 \
         libatspi2.0-0 \
         libcairo2 \
+        libcairo2-dev \
         libcups2 \
         libdbus-1-3 \
         libdrm2 \
@@ -46,6 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libnspr4 \
         libnss3 \
         libpango-1.0-0 \
+        libpango1.0-dev \
         libsm6 \
         libssl-dev \
         libusb-1.0-0 \
@@ -71,6 +75,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sudo \
         sqlite3 \
         tesseract-ocr \
+        texlive-fonts-recommended \
+        texlive-latex-base \
+        texlive-latex-extra \
+        texlive-science \
         unzip \
         xauth \
         xvfb \
@@ -105,6 +113,7 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         dash \
         httpx \
         lxml \
+        manim \
         matplotlib \
         manifold3d \
         meshio \
