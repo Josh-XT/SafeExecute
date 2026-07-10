@@ -174,8 +174,8 @@ RUN set -eux; \
     ln -sf /usr/local/bin/grok-build-cli /usr/local/bin/agent; \
     grok --version
 
-# Install Kiro CLI globally from the official Linux zip package. The zip path
-# avoids AppImage/FUSE requirements inside Docker while matching Kiro's CLI docs.
+# Install Kiro CLI globally from the official musl Linux zip package. The musl
+# build avoids both AppImage/FUSE requirements and host glibc version coupling.
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -183,9 +183,10 @@ RUN set -eux; \
         arm64) kiro_arch="aarch64" ;; \
         *) echo "Unsupported architecture for Kiro CLI: $arch" >&2; exit 1 ;; \
     esac; \
-    curl --proto '=https' --tlsv1.2 -fsSL "https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-${kiro_arch}-linux.zip" -o /tmp/kirocli.zip; \
+    curl --proto '=https' --tlsv1.2 -fsSL "https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-${kiro_arch}-linux-musl.zip" -o /tmp/kirocli.zip; \
     unzip -q /tmp/kirocli.zip -d /tmp; \
     Q_INSTALL_GLOBAL=1 Q_SKIP_SETUP=1 KIRO_CLI_SKIP_SETUP=1 /tmp/kirocli/install.sh; \
+    kiro-cli --version; \
     rm -rf /tmp/kirocli /tmp/kirocli.zip
 
 # Install GitHub Copilot Python SDK
