@@ -109,11 +109,10 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         beautifulsoup4 \
         biopython \
         bokeh \
-        cloakbrowser \
+        cloakbrowser==0.4.10 \
         dash \
         httpx \
         lxml \
-        manim \
         matplotlib \
         manifold3d \
         meshio \
