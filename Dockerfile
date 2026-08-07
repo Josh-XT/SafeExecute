@@ -109,7 +109,7 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         beautifulsoup4 \
         biopython \
         bokeh \
-        cloakbrowser==0.4.10 \
+        cloakbrowser==0.5.5 \
         dash \
         httpx \
         lxml \
