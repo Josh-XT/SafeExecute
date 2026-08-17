@@ -109,7 +109,7 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
         beautifulsoup4 \
         biopython \
         bokeh \
-        cloakbrowser==0.5.5 \
+        cloakbrowser==0.5.7 \
         dash \
         httpx \
         lxml \
@@ -191,3 +191,6 @@ RUN set -eux; \
 
 # Install GitHub Copilot Python SDK
 RUN pip install git+https://github.com/github/copilot-sdk.git#subdirectory=python
+
+# Browser wrapper upgrades are rolled out by rebuilding this pinned image.
+ENV CLOAKBROWSER_AUTO_UPDATE=false
