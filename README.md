@@ -22,6 +22,27 @@ The container comes preloaded with the following packages:
 - pandas
 - agixtsdk
 
+## Coding Tools
+
+The image includes Node/npm and the official TypeScript compiler (`tsc`). The
+fallback version is pinned by the Docker build argument `TYPESCRIPT_VERSION`.
+For a repository, install its locked development dependencies and use its own
+typecheck script so its compiler version takes precedence. The compiler package
+is `typescript`, not the unrelated npm package named `tsc`.
+
+Cursor CLI is installed as `/usr/local/bin/cursor-agent`. The global `agent`
+alias still belongs to Grok Build. WorkConductor uses a private scoped HOME for
+Cursor credentials and sessions; no account is logged in during image building.
+Older images remain compatible with WorkConductor's on-demand Cursor installer.
+
+Image builds run `tests/typescript-smoke.mjs` to verify real compilation,
+type-error failures, project-local tool precedence and exit-code preservation.
+They also check Cursor's version and ensure Grok's alias is unchanged. Verify
+provider login separately with an authorized account after deployment.
+
+References: [TypeScript installation](https://www.typescriptlang.org/download/)
+and [Cursor CLI installation](https://cursor.com/docs/cli/installation).
+
 ## Installation
 
 ```bash

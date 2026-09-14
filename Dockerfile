@@ -194,3 +194,24 @@ RUN pip install git+https://github.com/github/copilot-sdk.git#subdirectory=pytho
 
 # Browser wrapper upgrades are rolled out by rebuilding this pinned image.
 ENV CLOAKBROWSER_AUTO_UPDATE=false
+
+# Standalone TypeScript checks need the compiler, not the unrelated `tsc` npm
+# package. Repository npm scripts continue to prefer their local compiler.
+ARG TYPESCRIPT_VERSION=7.0.2
+COPY tests/typescript-smoke.mjs /tmp/typescript-smoke.mjs
+RUN npm install -g "typescript@${TYPESCRIPT_VERSION}" && \
+    node --test /tmp/typescript-smoke.mjs && \
+    rm /tmp/typescript-smoke.mjs
+
+# Cursor also calls its executable `agent`; do not replace Grok's global alias.
+# Only immutable CLI assets live here. WorkConductor supplies a scoped HOME and
+# credentials at runtime, including for browser/device sign-in.
+RUN curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 20 --max-time 120 \
+        https://cursor.com/install -o /tmp/install-cursor.sh && \
+    HOME=/opt/cursor-cli bash /tmp/install-cursor.sh && \
+    test -x /opt/cursor-cli/.local/bin/agent && \
+    chmod -R a+rX /opt/cursor-cli && \
+    ln -s /opt/cursor-cli/.local/bin/agent /usr/local/bin/cursor-agent && \
+    cursor-agent --version && \
+    test "$(readlink -f /usr/local/bin/agent)" = /usr/local/bin/grok-build-cli && \
+    rm /tmp/install-cursor.sh
