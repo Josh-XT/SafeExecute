@@ -160,13 +160,30 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
 RUN python -m playwright install chromium && \
     chmod -R a+rwX /ms-playwright
 
-# Install coding CLIs via npm globally
-RUN npm install -g @github/copilot @openai/codex @anthropic-ai/claude-code
+# Keep expensive, unrelated dependencies ahead of the CLI refresh boundary.
+RUN pip install git+https://github.com/github/copilot-sdk.git#subdirectory=python
+
+# Browser wrapper upgrades are rolled out by rebuilding this pinned image.
+ENV CLOAKBROWSER_AUTO_UPDATE=false
+
+ARG TYPESCRIPT_VERSION=7.0.2
+COPY tests/typescript-smoke.mjs /tmp/typescript-smoke.mjs
+RUN npm install -g "typescript@${TYPESCRIPT_VERSION}" && \
+    node --test /tmp/typescript-smoke.mjs && \
+    rm /tmp/typescript-smoke.mjs
+
+# CI changes this on every build (including scheduled builds). --pull alone
+# cannot invalidate cached RUN layers that install packages tagged latest.
+ARG CODING_CLI_REFRESH=manual
+RUN test -n "$CODING_CLI_REFRESH" && \
+    npm install -g @github/copilot@latest @openai/codex@latest @anthropic-ai/claude-code@latest
 
 # Grok Build CLI. Runtime authentication is injected per AGiXT agent from the
 # configured ~/.grok/auth.json contents, so the image only ships the binary.
 RUN set -eux; \
-    curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash; \
+    curl -fsSL --connect-timeout 20 --max-time 120 https://x.ai/cli/install.sh -o /tmp/install-grok.sh; \
+    GROK_BIN_DIR=/usr/local/bin bash /tmp/install-grok.sh; \
+    rm /tmp/install-grok.sh; \
     grok_binary="$(readlink -f /usr/local/bin/grok)"; \
     cp "$grok_binary" /usr/local/bin/grok-build-cli; \
     chmod 0755 /usr/local/bin/grok-build-cli; \
@@ -189,20 +206,6 @@ RUN set -eux; \
     kiro-cli --version; \
     rm -rf /tmp/kirocli /tmp/kirocli.zip
 
-# Install GitHub Copilot Python SDK
-RUN pip install git+https://github.com/github/copilot-sdk.git#subdirectory=python
-
-# Browser wrapper upgrades are rolled out by rebuilding this pinned image.
-ENV CLOAKBROWSER_AUTO_UPDATE=false
-
-# Standalone TypeScript checks need the compiler, not the unrelated `tsc` npm
-# package. Repository npm scripts continue to prefer their local compiler.
-ARG TYPESCRIPT_VERSION=7.0.2
-COPY tests/typescript-smoke.mjs /tmp/typescript-smoke.mjs
-RUN npm install -g "typescript@${TYPESCRIPT_VERSION}" && \
-    node --test /tmp/typescript-smoke.mjs && \
-    rm /tmp/typescript-smoke.mjs
-
 # Cursor also calls its executable `agent`; do not replace Grok's global alias.
 # Only immutable CLI assets live here. WorkConductor supplies a scoped HOME and
 # credentials at runtime, including for browser/device sign-in.
@@ -215,3 +218,10 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 20 --max-time 120 \
     cursor-agent --version && \
     test "$(readlink -f /usr/local/bin/agent)" = /usr/local/bin/grok-build-cli && \
     rm /tmp/install-cursor.sh
+
+# Fail the image build if any CLI is unusable by the unprivileged workspace
+# user. No credentials or inference requests are involved in these probes.
+COPY scripts/verify-coding-clis.py /usr/local/bin/verify-coding-clis.py
+RUN mkdir -p /usr/local/share/safeexecute && \
+    sudo -H -u safeexecute python3 /usr/local/bin/verify-coding-clis.py \
+        > /usr/local/share/safeexecute/coding-cli-versions.json

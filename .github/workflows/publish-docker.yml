@@ -7,17 +7,36 @@ permissions:
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * *'
+
+# Do not let an older publication overwrite a newer latest image.
+concurrency:
+  group: safeexecute-publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  test-cli-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -p 'test_coding_cli_versions.py'
+
   build-safeexecute:
+    needs: test-cli-checks
     uses: josh-xt/AGiXT/.github/workflows/docker.yml@main
     with:
+      push: ${{ github.event_name != 'pull_request' }}
       registry-dockerhub-enable: ${{ github.event_name != 'pull_request' }}
       registry-repo-name: SafeExecute
       registry-readme: ./README.md
+      build-args: |
+        CODING_CLI_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
       tags: |
         type=raw,value=latest,enable={{is_default_branch}}
         type=schedule
