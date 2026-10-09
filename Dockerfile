@@ -225,3 +225,8 @@ COPY scripts/verify-coding-clis.py /usr/local/bin/verify-coding-clis.py
 RUN mkdir -p /usr/local/share/safeexecute && \
     sudo -H -u safeexecute python3 /usr/local/bin/verify-coding-clis.py \
         > /usr/local/share/safeexecute/coding-cli-versions.json
+
+ARG POWERSHELL_VERSION=7.4.20
+ARG EXCHANGE_MODULE_VERSION=3.10.1
+COPY scripts/install-mail-tools.sh /tmp/install-mail-tools.sh
+RUN bash /tmp/install-mail-tools.sh && rm /tmp/install-mail-tools.sh
