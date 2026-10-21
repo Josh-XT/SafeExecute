@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
@@ -102,10 +102,12 @@ RUN groupadd -g 1000 safeexecute && \
     echo "safeexecute ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/safeexecute && \
     chmod 0440 /etc/sudoers.d/safeexecute
 
-RUN python -m pip install --upgrade pip setuptools wheel && \
+RUN python -m pip install "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70" && \
+    python -m pip install --upgrade setuptools wheel && \
     python -m pip install \
         agixtsdk \
         attrs \
+        "certifi>=2026.10.19" \
         beautifulsoup4 \
         biopython \
         bokeh \
