@@ -232,3 +232,16 @@ ARG POWERSHELL_VERSION=7.4.20
 ARG EXCHANGE_MODULE_VERSION=3.10.1
 COPY scripts/install-mail-tools.sh /tmp/install-mail-tools.sh
 RUN bash /tmp/install-mail-tools.sh && rm /tmp/install-mail-tools.sh
+
+# Keep workspace document/lint tools after the expensive scientific/CLI layers.
+ARG BLACK_VERSION=26.10.1
+ARG PYLINT_VERSION=4.1.3
+ARG ESLINT_VERSION=10.14.0
+ARG PRETTIER_VERSION=3.9.10
+ARG TYPESCRIPT_ESLINT_PARSER_VERSION=8.72.1
+COPY scripts/install-workspace-tools.sh /tmp/install-workspace-tools.sh
+RUN bash /tmp/install-workspace-tools.sh && rm /tmp/install-workspace-tools.sh
+COPY scripts/eslint.config.cjs /usr/local/share/safeexecute/eslint.config.cjs
+COPY scripts/verify-workspace-tools.py /usr/local/bin/verify-workspace-tools.py
+RUN sudo -H -u safeexecute python3 -I /usr/local/bin/verify-workspace-tools.py \
+        > /usr/local/share/safeexecute/workspace-tool-versions.json
