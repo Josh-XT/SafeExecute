@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 
-TOOLS = ("claude", "codex", "copilot", "grok", "kiro-cli", "cursor-agent")
+TOOLS = ("claude", "codex", "copilot", "grok", "cursor-agent")
 # Sonnet 5.5 requires this CLI release; older aliases select older models.
 MIN_CLAUDE_VERSION = (2, 1, 284)
 
