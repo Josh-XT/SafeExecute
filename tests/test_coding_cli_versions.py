@@ -33,10 +33,11 @@ class CodingCliVersionsTest(unittest.TestCase):
         verify.Path, "resolve", return_value=Path("/usr/local/bin/grok-build-cli")
     )
     @patch.object(verify.subprocess, "run")
-    def test_all_six_tools_probed_without_inference(self, run, resolve):
+    def test_bundled_tools_probed_without_installing_optional_kiro(self, run, resolve):
         run.return_value = subprocess.CompletedProcess([], 0, "2.1.284", "")
         self.assertEqual(set(verify.inventory()), set(verify.TOOLS))
-        self.assertEqual(run.call_count, 6)
+        self.assertEqual(run.call_count, 5)
+        self.assertNotIn("kiro-cli", verify.TOOLS)
         for call in run.call_args_list:
             self.assertEqual(call.args[0][1:], ["--version"])
             self.assertEqual(call.kwargs["timeout"], 45)

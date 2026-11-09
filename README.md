@@ -43,7 +43,7 @@ provider login separately with an authorized account after deployment.
 ### Keeping Coding CLIs Current
 
 Daily image publication and every manual/push build refresh Claude Code, Codex,
-GitHub Copilot, Cursor, Grok Build, and Kiro from their official latest installers.
+GitHub Copilot, Cursor, and Grok Build from their official latest installers.
 CI changes `CODING_CLI_REFRESH` on each build so Docker cannot reuse stale CLI
 installation layers. The scientific tools, browser, and TypeScript layers remain
 cacheable. For a local refresh without discarding the entire build cache:
@@ -52,12 +52,21 @@ cacheable. For a local refresh without discarding the entire build cache:
 docker build --pull --build-arg CODING_CLI_REFRESH="$(date -u +%Y%m%d%H%M%S)" -t joshxt/safeexecute:latest .
 ```
 
-All six executables must pass a version probe as the unprivileged workspace
+All five bundled executables must pass a version probe as the unprivileged workspace
 user before an image is published. Claude must be at least 2.1.284 for the
 [Opus/Sonnet 5.5 aliases](https://code.claude.com/docs/en/model-config).
 Installed versions are recorded at
 `/usr/local/share/safeexecute/coding-cli-versions.json`. These are credential-free
 startup checks, not end-to-end provider authentication or inference tests.
+
+Kiro is optional. The `kiro-cli` launcher downloads it on first invocation inside
+the user's sandbox using the [official installer](https://cli.kiro.dev/install).
+No Kiro download or installation runs during image builds or their version probes.
+The installation is cached under the scoped HOME, uses no sudo, and is serialized
+for concurrent callers. Installer processes receive no provider credentials;
+the CLI itself retains the caller's environment and HOME for authentication.
+First use requires outbound access to Kiro's download services. A failed install
+fails that invocation and can be retried without affecting other workspace tools.
 
 On deployed hosts, pull the new image and retire old sandbox containers only
 after their work and CLI sign-in sessions finish. Pulling an image does **not**
