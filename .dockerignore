@@ -1,0 +1,9 @@
+# Only image inputs; never send local credentials or repository metadata.
+**
+!Dockerfile
+!scripts/
+!scripts/**
+!tests/
+!tests/**
+**/__pycache__/
+**/*.pyc

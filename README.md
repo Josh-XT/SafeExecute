@@ -73,6 +73,52 @@ docker run --rm --user safeexecute --entrypoint python3 joshxt/safeexecute:lates
 References: [TypeScript installation](https://www.typescriptlang.org/download/)
 and [Cursor CLI installation](https://cursor.com/docs/cli/installation).
 
+## Workspace Document and Media Tools
+
+A late image layer adds Pandoc, Black, Pylint, ESLint, Prettier and the
+TypeScript ESLint parser without rebuilding the scientific/browser layers.
+Pandoc uses the existing `pdflatex` engine, with Latin Modern fonts for its
+default template. FFmpeg/FFprobe, pandas, openpyxl, Pillow and PyMuPDF remain
+provided by the earlier layers. No runtime package download or account login
+is needed for these tools.
+
+Python tools support isolated invocations such as `python3 -I -m black` and
+`python3 -I -m pylint`. ESLint and Prettier are globally installed and available
+through `npx --no-install`. Version pins are Docker build arguments:
+`BLACK_VERSION`, `PYLINT_VERSION`, `ESLINT_VERSION`, `PRETTIER_VERSION`, and
+`TYPESCRIPT_ESLINT_PARSER_VERSION`.
+
+For standalone JavaScript/TypeScript files, the image provides a fixed config
+with syntax checking and basic debugger/unreachable-code rules:
+
+```bash
+npx --no-install eslint --no-config-lookup --config /usr/local/share/safeexecute/eslint.config.cjs --no-inline-config --format=json -- example.ts
+npx --no-install prettier --no-config --write -- example.ts
+```
+
+This config is not project-specific or type-aware linting. Projects requiring
+their own rules/plugins should install their locked dependencies and run their
+lint script inside the sandbox. Document engines, project code and lint plugins
+must execute inside the sandbox, not on the host.
+
+The image build runs `verify-workspace-tools.py` as the non-root workspace user.
+It creates disposable PDF/DOCX/XLSX/PNG files, checks PDF text and spreadsheet
+contents, formats Python/JS/TS/JSON, checks both passing and failing lint results,
+and renders a short H.264 video with subtitles. Its subprocess environment is
+allowlisted, its HOME/cache directories are temporary, and npm is offline.
+Installed versions are recorded in
+`/usr/local/share/safeexecute/workspace-tool-versions.json`.
+
+Repeat the probes without network access, credentials or host mounts:
+
+```bash
+docker run --rm --network none --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m --pids-limit 128 --memory 1g --cpus 2 --entrypoint python3 joshxt/safeexecute:latest -I /usr/local/bin/verify-workspace-tools.py
+```
+
+These are local tool-readiness checks, not verification of every sandbox policy
+or every project configuration. Testing a derived image on an existing cached
+base does not verify a complete fresh image build or another architecture.
+
 ## Installation
 
 ```bash
